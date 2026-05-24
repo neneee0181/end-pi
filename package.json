@@ -1,6 +1,6 @@
 {
   "name": "end-pi",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Use Pi providers in Codex Desktop with seamless history switching, image input, and a local OpenAI-compatible proxy.",
   "type": "module",
   "bin": {
@@ -34,6 +34,7 @@
     "@earendil-works/pi-ai": "^0.75.5",
     "@hono/node-server": "^1.13.7",
     "better-sqlite3": "^12.10.0",
+    "end-pi": "^0.0.6",
     "hono": "^4.7.7",
     "toml": "^3.0.0"
   },

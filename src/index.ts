@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { serve } from "@hono/node-server";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
-import { join } from "path";
+import { dirname, join } from "path";
 import { app } from "./server.js";
 import { readPiAuth, readPiSettings, isTokenExpired } from "./pi-config.js";
 import { applyProxy, restoreProxy, isProxyActive, migrateToProxy } from "./codex-patch.js";
@@ -16,6 +16,7 @@ const CODEX_DIR = join(homedir(), ".codex");
 const PID_FILE = join(CODEX_DIR, "end-pi-proxy.pid");
 const LOG_FILE = join(CODEX_DIR, "end-pi.log");
 const ENTRY_FILE = fileURLToPath(import.meta.url);
+const PACKAGE_JSON_FILE = join(dirname(ENTRY_FILE), "..", "package.json");
 const MULTIPASS_PACKAGE = "end-pi-multi-pass";
 const MULTIPASS_GIT_SPEC = "git:github.com/neneee0181/end-pi-multi-pass";
 const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
@@ -35,6 +36,11 @@ async function main() {
   if (args.includes("--switch-restore")) {
     await switchToVanilla();
     return;
+  }
+
+  if (!args.includes("--no-update")) {
+    const updated = await maybeSelfUpdate();
+    if (updated) return;
   }
 
   if (args.includes("setup") || args.includes("--setup") || args.includes("--install-multipass")) {
@@ -103,6 +109,61 @@ async function main() {
   console.log(`[ end-pi ] multipass:${isMultipassInstalled() ? "installed" : "not installed (run 'ep setup')"}`);
 
   launchPiTui();
+}
+
+async function maybeSelfUpdate(): Promise<boolean> {
+  if (process.env.EP_SKIP_UPDATE === "1") return false;
+
+  const current = getCurrentPackageVersion();
+  if (!current) return false;
+
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const latest = spawnSync(npm, ["view", "end-pi", "version"], {
+    encoding: "utf-8",
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  if (latest.status !== 0) return false;
+
+  const latestVersion = latest.stdout.trim();
+  if (!latestVersion || compareVersions(latestVersion, current) <= 0) return false;
+
+  console.log(`[ end-pi ] update available ${current} → ${latestVersion}. Installing first...`);
+  const install = spawnSync(npm, ["install", "-g", `end-pi@${latestVersion}`], {
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (install.status !== 0) {
+    console.warn(`[ end-pi ] update failed; continuing with ${current}.`);
+    return false;
+  }
+
+  console.log(`[ end-pi ] updated to ${latestVersion}. Restarting command...\n`);
+  const restart = spawnSync(process.execPath, [ENTRY_FILE, ...args.filter((arg) => arg !== "--no-update")], {
+    stdio: "inherit",
+    env: { ...process.env, EP_SKIP_UPDATE: "1" },
+    windowsHide: true,
+  });
+  process.exit(restart.status ?? 0);
+}
+
+function getCurrentPackageVersion(): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(PACKAGE_JSON_FILE, "utf-8")) as { version?: string };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 async function switchToProxy(): Promise<void> {
