@@ -6,13 +6,13 @@ Use Pi providers inside Codex Desktop.
 
 ## Screenshot
 
-![Codex Desktop using end-pi](https://raw.githubusercontent.com/neneee0181/end-pi/main/assets/codex-desktop.png)
+![Codex Desktop using end-pi](./assets/codex-desktop.png)
 
 ## Why
 
 Codex Desktop understands OpenAI-compatible providers. Pi already knows how to authenticate and call many providers. `end-pi` connects them:
 
-- Codex Desktop sends OpenAI Responses requests to `http://localhost:3141/v1`.
+- Codex Desktop sends OpenAI Responses requests to the local `end-pi` proxy.
 - `end-pi` converts them into Pi context.
 - Pi calls the provider/model selected in the Pi TUI.
 - Responses stream back to Codex Desktop.
@@ -63,6 +63,8 @@ This installs `end-pi-multi-pass` through Pi when it is missing. After that, ope
 /mp-preset
 ```
 
+By default, the companion is installed from npm. If you need a custom git source, set `END_PI_MULTIPASS_GIT` before running setup.
+
 Start or switch Codex Desktop into Pi-backed mode:
 
 ```bash
@@ -101,6 +103,8 @@ Check status:
 ep --status
 ```
 
+`end-pi` uses port `3141` by default. If that port is busy, it automatically selects a nearby free port and patches Codex with the selected endpoint. To force a port, set `END_PI_PORT`.
+
 Install or verify the multi-pass companion extension:
 
 ```bash
@@ -136,7 +140,7 @@ Codex Desktop stores conversation metadata in SQLite and rollout `.jsonl` sessio
 - `ep` moves native Codex conversations to the `end-pi` provider.
 - `ep --restore` moves `end-pi` conversations back to native Codex.
 
-This mirrors the migration approach used by provider gateway tools such as `rcodex`.
+This keeps conversations available when switching between native Codex and Pi-backed mode.
 
 ## Logs
 

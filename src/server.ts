@@ -228,11 +228,29 @@ app.post("/v1/chat/completions", async (c) => {
 
 // Health + current model status
 app.get("/health", async (c) => {
-  const settings = await readPiSettings();
+  const settings = await readPiSettingsSafe();
   return c.json({ status: "ok", service: "end-pi", currentModel: `${settings.defaultProvider}/${settings.defaultModel}` });
 });
 
+app.get("/", async (c) => {
+  const settings = await readPiSettingsSafe();
+  return c.json({
+    service: "end-pi",
+    status: "ok",
+    currentModel: `${settings.defaultProvider ?? "unknown"}/${settings.defaultModel ?? "unknown"}`,
+    endpoints: ["/health", "/v1/models", "/v1/responses", "/v1/chat/completions"],
+  });
+});
+
 // --- Helpers ---
+
+async function readPiSettingsSafe(): Promise<{ defaultProvider: string; defaultModel: string }> {
+  const settings = await readPiSettings().catch(() => null);
+  return {
+    defaultProvider: settings?.defaultProvider ?? "unknown",
+    defaultModel: settings?.defaultModel ?? "unknown",
+  };
+}
 
 async function resolvePiCurrentModel() {
   const [settings, auth] = await Promise.all([readPiSettings(), readPiAuth()]);

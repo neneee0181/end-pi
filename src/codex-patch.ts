@@ -39,16 +39,16 @@ export async function applyProxy(port: number): Promise<void> {
   }
 
   // Insert stable proxy model/provider after existing top-level keys.
-  const lines = config.split("\n");
+  const configWithoutProvider = removeProviderBlock(config, PROVIDER_ID);
+  const lines = configWithoutProvider.split("\n");
   const insertAt = lines.findIndex((l) => l.startsWith("["));
   const before = (insertAt === -1 ? lines : lines.slice(0, insertAt))
     .filter((l) => !l.trim().startsWith("model_provider =") && !l.trim().startsWith("model ="));
   const after = insertAt === -1 ? [] : lines.slice(insertAt);
-  const hasProviderBlock = config.includes(`[model_providers.${PROVIDER_ID}]`);
 
   const patched =
     [...before, MODEL_LINE, MODEL_PROVIDER_LINE, "", ...after].join("\n") +
-    (hasProviderBlock ? "" : PROVIDER_BLOCK(port));
+    PROVIDER_BLOCK(port);
 
   await writeFile(CODEX_CONFIG, patched, "utf-8");
 
@@ -56,6 +56,23 @@ export async function applyProxy(port: number): Promise<void> {
   process.env["EP_API_KEY"] = "end-pi-local";
 
   console.log(`  ✓ config.toml patched — provider "end-pi" active`);
+}
+
+function removeProviderBlock(config: string, providerId: string): string {
+  const lines = config.split("\n");
+  const output: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (line.trim() === `[model_providers.${providerId}]`) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && line.startsWith("[") && line.trim() !== "") {
+      skipping = false;
+    }
+    if (!skipping) output.push(line);
+  }
+  return output.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 export async function restoreProxy(): Promise<void> {

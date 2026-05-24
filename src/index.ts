@@ -5,12 +5,14 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writ
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { createServer } from "net";
 import { app } from "./server.js";
 import { readPiAuth, readPiSettings, isTokenExpired } from "./pi-config.js";
 import { applyProxy, restoreProxy, isProxyActive, migrateToProxy } from "./codex-patch.js";
 import { findCodexLaunchTarget, killCodexDesktop, launchCodexDesktop, setUserEnv } from "./platform.js";
 
-const PORT = 3141;
+const DEFAULT_PORT = 3141;
+const PORT_FILE = join(homedir(), ".codex", "end-pi-port");
 const args = process.argv.slice(2);
 const CODEX_DIR = join(homedir(), ".codex");
 const PID_FILE = join(CODEX_DIR, "end-pi-proxy.pid");
@@ -19,7 +21,7 @@ const REQUEST_LOG_DIR = join(CODEX_DIR, "end-pi-requests");
 const ENTRY_FILE = fileURLToPath(import.meta.url);
 const PACKAGE_JSON_FILE = join(dirname(ENTRY_FILE), "..", "package.json");
 const MULTIPASS_PACKAGE = "end-pi-multi-pass";
-const MULTIPASS_GIT_SPEC = "git:github.com/neneee0181/end-pi-multi-pass";
+const MULTIPASS_GIT_SPEC = process.env.END_PI_MULTIPASS_GIT;
 const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
 const PI_EXTENSIONS_DIR = join(homedir(), ".pi", "agent", "extensions");
 
@@ -73,10 +75,12 @@ async function main() {
 
   if (args.includes("--status") || args.includes("-s")) {
     const active = isProxyActive();
+    const port = readSavedProxyPort();
     const auth = await readPiAuth().catch(() => ({}));
     const settings = await readPiSettings();
     console.log(`\n[ end-pi ] Status`);
     console.log(`  Proxy:    ${active ? "✓ active" : "✗ inactive"}`);
+    console.log(`  Endpoint: http://localhost:${port}/v1`);
     console.log(`  Model:    ${settings.defaultProvider ?? "?"}/${settings.defaultModel ?? "?"}`);
     console.log(`  Providers:`);
     for (const [provider, entry] of Object.entries(auth)) {
@@ -112,11 +116,13 @@ async function main() {
   }
 
   await ensureProxyDaemon();
+  const port = readSavedProxyPort();
   migrateToProxy();
+  await applyProxy(port);
   setUserEnv("EP_API_KEY", "end-pi-local");
 
   // Print startup info BEFORE Pi takes over stdout
-  console.log(`[ end-pi ] proxy:${PORT} | already active | log: ~/.codex/end-pi.log`);
+  console.log(`[ end-pi ] proxy:${port} | already active | log: ~/.codex/end-pi.log`);
   console.log(`[ end-pi ] multipass:${isMultipassInstalled() ? "installed" : "not installed (run 'ep setup')"}`);
 
   launchPiTui();
@@ -207,11 +213,11 @@ function compareVersions(a: string, b: string): number {
 
 async function switchToProxy(): Promise<void> {
   daemonLog("switch proxy: start");
-  await ensureProxyDaemon();
+  const port = await ensureProxyDaemon();
   const launchTarget = findCodexLaunchTarget();
   killCodexDesktop();
   await new Promise((r) => setTimeout(r, 1200));
-  await applyProxy(PORT);
+  await applyProxy(port);
   migrateToProxy();
   setUserEnv("EP_API_KEY", "end-pi-local");
   daemonLog(`switch proxy: launch=${launchCodexDesktop(launchTarget)}`);
@@ -257,7 +263,7 @@ async function installMultipass(): Promise<void> {
 
   console.log(`  Installing ${MULTIPASS_PACKAGE} with Pi...\n`);
   let code = await runInteractive("pi", ["install", `npm:${MULTIPASS_PACKAGE}`]);
-  if (code !== 0) {
+  if (code !== 0 && MULTIPASS_GIT_SPEC) {
     console.log(`\n  npm install failed; trying ${MULTIPASS_GIT_SPEC}...\n`);
     code = await runInteractive("pi", ["install", MULTIPASS_GIT_SPEC]);
   }
@@ -279,10 +285,29 @@ function isMultipassInstalled(): boolean {
   const extensionDirs = [
     PI_EXTENSIONS_DIR,
     join(PI_AGENT_DIR, "npm", "node_modules", MULTIPASS_PACKAGE, "extensions"),
-    join(PI_AGENT_DIR, "git", "github.com", "neneee0181", MULTIPASS_PACKAGE, "extensions"),
+    ...findPackageExtensionDirs(join(PI_AGENT_DIR, "git"), MULTIPASS_PACKAGE),
   ];
 
   return extensionDirs.some(hasMultipassExtension);
+}
+
+function findPackageExtensionDirs(root: string, packageName: string): string[] {
+  const matches: string[] = [];
+  const visit = (dir: string, depth: number) => {
+    if (depth > 5) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (dir.endsWith(packageName)) matches.push(join(dir, "extensions"));
+    for (const entry of entries) {
+      if (entry.isDirectory()) visit(join(dir, entry.name), depth + 1);
+    }
+  };
+  visit(root, 0);
+  return matches;
 }
 
 function hasMultipassExtension(dir: string): boolean {
@@ -320,10 +345,12 @@ async function runProxyDaemon(): Promise<void> {
   });
 
   writeFileSync(PID_FILE, String(process.pid), "utf-8");
+  const port = getRequestedProxyPort();
+  writeFileSync(PORT_FILE, String(port), "utf-8");
   daemonLog(`daemon starting pid=${process.pid}`);
 
-  const server = serve({ fetch: app.fetch, port: PORT });
-  daemonLog(`daemon listening http://localhost:${PORT}`);
+  const server = serve({ fetch: app.fetch, port });
+  daemonLog(`daemon listening http://localhost:${port}`);
   const cleanup = () => {
     server.close();
     if (existsSync(PID_FILE) && readFileSync(PID_FILE, "utf-8").trim() === String(process.pid)) {
@@ -340,20 +367,23 @@ async function runProxyDaemon(): Promise<void> {
   });
 }
 
-async function ensureProxyDaemon(): Promise<void> {
-  if (await isProxyDaemonRunning()) return;
+async function ensureProxyDaemon(): Promise<number> {
+  const runningPort = await findRunningProxyPort();
+  if (runningPort) return runningPort;
   cleanupStaleProxyDaemon();
+  const port = await chooseProxyPort();
 
   const child = spawn(process.execPath, selfArgs("--proxy-daemon"), {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
+    env: { ...process.env, END_PI_PORT: String(port) },
   });
   child.unref();
 
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 250));
-    if (await isProxyDaemonRunning()) return;
+    if (await isProxyDaemonRunning(port)) return port;
   }
 
   throw new Error("Proxy daemon did not start. Run 'ep --status' or check ~/.codex/end-pi.log.");
@@ -387,16 +417,77 @@ function selfArgs(...nextArgs: string[]): string[] {
   return [ENTRY_FILE, ...nextArgs];
 }
 
-async function isProxyDaemonRunning(): Promise<boolean> {
+async function isProxyDaemonRunning(port = readSavedProxyPort()): Promise<boolean> {
   for (const host of ["localhost", "[::1]", "127.0.0.1"]) {
     try {
-      const res = await fetch(`http://${host}:${PORT}/health`, { signal: AbortSignal.timeout(1000) });
+      const res = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(1000) });
       if (!res.ok) continue;
       const body = await res.json().catch(() => null) as { service?: string } | null;
       if (body?.service === "end-pi") return true;
     } catch { /* try next host */ }
   }
   return false;
+}
+
+async function findRunningProxyPort(): Promise<number | null> {
+  const candidates = uniquePorts([readSavedProxyPort(), DEFAULT_PORT, ...readConfiguredCandidatePorts()]);
+  for (const port of candidates) {
+    if (await isProxyDaemonRunning(port)) return port;
+  }
+  return null;
+}
+
+function getRequestedProxyPort(): number {
+  return parsePort(process.env.END_PI_PORT) ?? readSavedProxyPort();
+}
+
+function readSavedProxyPort(): number {
+  return parsePort(process.env.END_PI_PORT) ?? parsePort(readText(PORT_FILE)) ?? DEFAULT_PORT;
+}
+
+function readConfiguredCandidatePorts(): number[] {
+  const configPath = join(CODEX_DIR, "config.toml");
+  const config = readText(configPath);
+  if (!config) return [];
+  return [...config.matchAll(/base_url\s*=\s*"http:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)\/v1"/g)]
+    .map((match) => Number(match[1]))
+    .filter((port) => Number.isInteger(port));
+}
+
+async function chooseProxyPort(): Promise<number> {
+  const requested = parsePort(process.env.END_PI_PORT);
+  if (requested) return requested;
+  const candidates = uniquePorts([readSavedProxyPort(), DEFAULT_PORT, ...Array.from({ length: 59 }, (_, i) => DEFAULT_PORT + i + 1)]);
+  for (const port of candidates) {
+    if (await isPortAvailable(port)) return port;
+  }
+  throw new Error("No available local port found for end-pi proxy.");
+}
+
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => server.close(() => resolve(true)));
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+function parsePort(value: unknown): number | null {
+  const port = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
+}
+
+function readText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf-8").trim();
+  } catch {
+    return null;
+  }
+}
+
+function uniquePorts(ports: number[]): number[] {
+  return [...new Set(ports.filter((port) => Number.isInteger(port) && port > 0 && port < 65536))];
 }
 
 function daemonLog(message: string): void {
