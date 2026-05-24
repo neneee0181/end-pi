@@ -1,13 +1,21 @@
 import { Hono } from "hono";
 import { stream as honoStream } from "hono/streaming";
-import { getModel, stream as piStream } from "@earendil-works/pi-ai";
-import type { Context as PiContext, Message, UserMessage, AssistantMessage } from "@earendil-works/pi-ai";
+import { getModel, getModels, stream as piStream } from "@earendil-works/pi-ai";
+import type { Api, Context as PiContext, Message, Model, UserMessage, AssistantMessage } from "@earendil-works/pi-ai";
 import { readPiAuth, readPiSettings, getAccessTokenForProvider } from "./pi-config.js";
+import {
+  ANTIGRAVITY_MODELS,
+  createAntigravityModel,
+  getAntigravityApiKey,
+  isAntigravityProvider,
+  streamAntigravityDirect,
+} from "./antigravity.js";
 import { createWriteStream } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
 type PiUserContentPart = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+type ProxyStreamFn = typeof piStream;
 
 // Log to file, not stdout (Pi TUI owns stdout)
 const logFile = createWriteStream(join(homedir(), ".codex", "end-pi.log"), { flags: "a" });
@@ -47,7 +55,7 @@ app.post("/v1/responses", async (c) => {
   const body = await c.req.json();
   const isStreaming: boolean = body.stream ?? false;
 
-  const { piModel, accessToken, info, error } = await resolvePiCurrentModel();
+  const { piModel, accessToken, info, error, streamFn } = await resolvePiCurrentModel();
   if (error) return c.json({ error: { message: error } }, 503);
 
   log(`[ep] /v1/responses → ${info}`);
@@ -82,7 +90,7 @@ app.post("/v1/responses", async (c) => {
 
       let fullText = "";
       try {
-        const eventStream = piStream(piModel!, context, { apiKey: accessToken });
+        const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
         for await (const event of eventStream) {
           if (event.type === "text_delta") {
             fullText += event.delta;
@@ -123,7 +131,7 @@ app.post("/v1/responses", async (c) => {
       });
     });
   } else {
-    const eventStream = piStream(piModel!, context, { apiKey: accessToken });
+    const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
     const result = await eventStream.result();
     const text = result.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
     return c.json({
@@ -137,7 +145,7 @@ app.post("/v1/responses", async (c) => {
 // POST /v1/chat/completions (fallback)
 app.post("/v1/chat/completions", async (c) => {
   const body = await c.req.json();
-  const { piModel, accessToken, info, error } = await resolvePiCurrentModel();
+  const { piModel, accessToken, info, error, streamFn } = await resolvePiCurrentModel();
   if (error) return c.json({ error: { message: error } }, 503);
 
   log(`[ep] /v1/chat/completions → ${info}`);
@@ -147,7 +155,7 @@ app.post("/v1/chat/completions", async (c) => {
   if (body.stream) {
     c.header("Content-Type", "text/event-stream");
     return honoStream(c, async (stream) => {
-      const eventStream = piStream(piModel!, context, { apiKey: accessToken });
+      const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
       for await (const event of eventStream) {
         if (event.type === "text_delta") {
           await stream.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: info, choices: [{ index: 0, delta: { content: event.delta }, finish_reason: null }] })}\n\n`);
@@ -156,7 +164,7 @@ app.post("/v1/chat/completions", async (c) => {
       await stream.write("data: [DONE]\n\n");
     });
   }
-  const eventStream = piStream(piModel!, context, { apiKey: accessToken });
+  const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
   const result = await eventStream.result();
   const text = result.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
   return c.json({ id, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: info, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage: { prompt_tokens: result.usage.input, completion_tokens: result.usage.output, total_tokens: result.usage.totalTokens } });
@@ -176,33 +184,71 @@ async function resolvePiCurrentModel() {
   const modelId = settings.defaultModel;
 
   if (!provider || !modelId) {
-    return { error: "Pi has no defaultProvider/defaultModel set. Use /model in Pi TUI.", piModel: null, accessToken: "", info: "" };
+    return { error: "Pi has no defaultProvider/defaultModel set. Use /model in Pi TUI.", piModel: null, accessToken: "", info: "", streamFn: piStream };
   }
 
   const authEntry = auth[provider];
   if (!authEntry) {
-    return { error: `Provider "${provider}" not authenticated in Pi. Log in via Pi first.`, piModel: null, accessToken: "", info: "" };
+    return { error: `Provider "${provider}" not authenticated in Pi. Log in via Pi first.`, piModel: null, accessToken: "", info: "", streamFn: piStream };
   }
 
-  let piModel: ReturnType<typeof getModel> | undefined;
+  const resolved = resolveProviderRegistry(provider, modelId);
+  let piModel: Model<Api> | undefined;
   try {
-    piModel = getModel(provider as any, modelId as any);
+    piModel = resolved.piModel ?? getModel(resolved.modelProvider as any, modelId as any);
   } catch { /* ignore */ }
 
   if (!piModel) {
-    const { getModels } = await import("@earendil-works/pi-ai");
-    const available = getModels(provider as any);
-    if (!available.length) return { error: `No models for provider "${provider}"`, piModel: null, accessToken: "", info: "" };
+    const available = getModels(resolved.modelProvider as any);
+    if (!available.length) return { error: `No models for provider "${provider}"`, piModel: null, accessToken: "", info: "", streamFn: piStream };
     piModel = available[0];
-    log(`[ep] "${modelId}" not in pi-ai registry, fallback to "${piModel.id}"`);
+    log(`[ep] "${modelId}" not in pi-ai registry for "${provider}", fallback to "${resolved.modelProvider}/${piModel.id}"`);
   }
 
   try {
-    const accessToken = await getAccessTokenForProvider(provider, auth);
-    return { piModel, accessToken, info: `${provider}/${piModel.id}`, error: null };
+    const accessToken = resolved.antigravity
+      ? await getAntigravityApiKey(provider, auth)
+      : await getAccessTokenForProvider(provider, auth, resolved.oauthProvider);
+    return {
+      piModel: { ...piModel, provider },
+      accessToken,
+      info: `${provider}/${piModel.id}`,
+      error: null,
+      streamFn: resolved.antigravity ? streamAntigravityDirect as ProxyStreamFn : piStream,
+    };
   } catch (e: any) {
-    return { error: e.message, piModel: null, accessToken: "", info: "" };
+    return { error: e.message, piModel: null, accessToken: "", info: "", streamFn: piStream };
   }
+}
+
+function resolveProviderRegistry(provider: string, modelId: string): {
+  modelProvider: string;
+  oauthProvider: string;
+  antigravity: boolean;
+  piModel?: Model<Api>;
+} {
+  if (isAntigravityProvider(provider)) {
+    return {
+      modelProvider: "google-antigravity",
+      oauthProvider: "google-antigravity",
+      antigravity: true,
+      piModel: createAntigravityModel(provider, ANTIGRAVITY_MODELS.includes(modelId as any) ? modelId : ANTIGRAVITY_MODELS[0]),
+    };
+  }
+
+  const directModels = getModels(provider as any);
+  if (directModels.length) return { modelProvider: provider, oauthProvider: provider, antigravity: false };
+
+  const baseProvider = stripMultipassSuffix(provider);
+  if (baseProvider !== provider && getModels(baseProvider as any).length) {
+    return { modelProvider: baseProvider, oauthProvider: baseProvider, antigravity: false };
+  }
+
+  return { modelProvider: provider, oauthProvider: provider, antigravity: false };
+}
+
+function stripMultipassSuffix(provider: string): string {
+  return provider.replace(/-\d+$/, "");
 }
 
 function responsesInputToPiContext(input: unknown): PiContext {

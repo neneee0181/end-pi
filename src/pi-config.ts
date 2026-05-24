@@ -54,12 +54,12 @@ export function getAccessToken(entry: PiAuthEntry): string {
   return entry.access;
 }
 
-export async function getAccessTokenForProvider(provider: string, auth: PiAuth): Promise<string> {
+export async function getAccessTokenForProvider(provider: string, auth: PiAuth, oauthProvider = provider): Promise<string> {
   const entry = auth[provider];
   if (!entry) throw new Error(`Provider "${provider}" not authenticated in Pi. Log in via Pi first.`);
   if (entry.type === "apiKey") return entry.key;
 
-  const result = await getOAuthApiKey(provider, { [provider]: entry as unknown as OAuthCredentials });
+  const result = await getOAuthApiKey(oauthProvider, { [oauthProvider]: entry as unknown as OAuthCredentials });
   if (!result) throw new Error(`Provider "${provider}" not authenticated in Pi. Log in via Pi first.`);
 
   auth[provider] = { type: "oauth", ...result.newCredentials };
