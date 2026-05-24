@@ -10,18 +10,18 @@ tags:
   - memoc/state
 ---
 # Session Summary
-Last: 2026-05-24T22:40:00+09:00
+Last: 2026-05-24T22:50:00+09:00
 Replace this file instead of appending to it. Keep total size <800B and each section ≤3 bullets.
 Completed history belongs in actor worklogs; incomplete/risky resume detail belongs in `04-handoff.md`.
 Agent-owned — updated by you, not by `memoc update`.
 
 ## Status
-- end-pi dev linked locally; version now 0.0.12.
+- end-pi dev linked locally; version now 0.0.13.
 - Proxy bridges Codex Responses tools to Pi and logs requests under `~/.codex/end-pi-requests`.
 
 ## Changed
 - Added provider stream error/done handling so empty provider output returns a visible end-pi error instead of Codex reconnect loops.
-- Fixed function_call argument fallback to remembered tool call args.
+- Annotates failing/unproductive tool outputs so models stop polling stuck memoc/npm sessions and switch to local search.
 
 ## Open Tasks
 - Retest Codex Desktop ep mode with project-search/tool calls after restarting ep.

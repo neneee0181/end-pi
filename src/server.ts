@@ -330,7 +330,7 @@ function responsesInputToPiContext(input: unknown, instructions?: unknown): PiCo
             role: "toolResult",
             toolCallId: callId,
             toolName: String(item.name ?? item.tool_name ?? remembered?.name ?? "tool"),
-            content: [{ type: "text", text: String(item.output ?? "") }],
+            content: [{ type: "text", text: annotateToolOutput(String(item.output ?? "")) }],
             isError: Boolean(item.is_error ?? item.isError ?? false),
             timestamp: Date.now(),
           } as Message);
@@ -515,6 +515,17 @@ function parseToolArguments(raw: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function annotateToolOutput(output: string): string {
+  const notes: string[] = [];
+  if (/Process running with session ID/i.test(output) && /Original token count:\s*0/i.test(output)) {
+    notes.push("end-pi note: this background command has produced no output; do not keep polling it repeatedly. Try a quick local command or explain the blockage.");
+  }
+  if (/memoc.+not recognized|npm error code EACCES|npm exec @kevin0181\/memoc/i.test(output)) {
+    notes.push("end-pi note: memoc is unavailable in this environment. Do not retry memoc; use local file search commands such as rg, Get-ChildItem, or project-specific files instead.");
+  }
+  return notes.length ? `${output}\n\n${notes.join("\n")}` : output;
 }
 
 function emptyUsage(): AssistantMessage["usage"] {
