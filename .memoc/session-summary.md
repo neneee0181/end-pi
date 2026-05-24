@@ -21,7 +21,7 @@ Agent-owned — updated by you, not by `memoc update`.
 
 ## Changed
 - Added provider stream error/done handling so empty provider output returns a visible end-pi error instead of Codex reconnect loops.
-- Annotates failing/unproductive tool outputs so models stop polling stuck memoc/npm sessions and switch to local search.
+- Annotates failing/unproductive tool outputs so models stop polling stuck commands and choose an available fallback.
 
 ## Open Tasks
 - Retest Codex Desktop ep mode with project-search/tool calls after restarting ep.

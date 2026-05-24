@@ -522,8 +522,8 @@ function annotateToolOutput(output: string): string {
   if (/Process running with session ID/i.test(output) && /Original token count:\s*0/i.test(output)) {
     notes.push("end-pi note: this background command has produced no output; do not keep polling it repeatedly. Try a quick local command or explain the blockage.");
   }
-  if (/memoc.+not recognized|npm error code EACCES|npm exec @kevin0181\/memoc/i.test(output)) {
-    notes.push("end-pi note: memoc is unavailable in this environment. Do not retry memoc; use local file search commands such as rg, Get-ChildItem, or project-specific files instead.");
+  if (/(?:The term '.+' is not recognized|is not recognized as a name of a cmdlet|command not found|npm error code EACCES|npm ERR! code EACCES|permission denied|access denied)/i.test(output)) {
+    notes.push("end-pi note: this command failed because the executable or permission is unavailable. Do not retry the same command unchanged; choose an available tool, use a local fallback, or explain the blockage.");
   }
   return notes.length ? `${output}\n\n${notes.join("\n")}` : output;
 }
