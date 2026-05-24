@@ -1,6 +1,6 @@
 {
   "name": "end-pi",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Use Pi providers in Codex Desktop with seamless history switching, image input, and a local OpenAI-compatible proxy.",
   "type": "module",
   "bin": {
@@ -19,6 +19,7 @@
     "start": "node dist/index.js"
   },
   "keywords": [
+    "pi-package",
     "pi",
     "codex",
     "codex-desktop",
