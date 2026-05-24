@@ -149,7 +149,19 @@ app.post("/v1/responses", async (c) => {
             outputItems.push(item);
             outputIndex += 1;
           } else if (event.type === "error") {
-            logErr(`[ep] stream error:`, (event as any).error?.errorMessage ?? event);
+            const message = streamErrorMessage(event);
+            logErr(`[ep] stream error:`, message);
+            if (!textStarted && !fullText && !outputItems.length) {
+              fullText = `[end-pi provider error] ${message}`;
+            }
+            break;
+          } else if (event.type === "done") {
+            const doneItems = assistantContentToResponseOutput((event as any).message?.content ?? []);
+            if (!textStarted && !fullText && !outputItems.length && doneItems.length) {
+              outputItems.push(...doneItems);
+              outputIndex += doneItems.length;
+            }
+            log(`[ep] stream done: ${(event as any).reason ?? "unknown"}, outputs=${outputItems.length + (fullText ? 1 : 0)}`);
           }
         }
       } catch (e: any) {
@@ -157,6 +169,10 @@ app.post("/v1/responses", async (c) => {
         fullText = `[end-pi error] ${e.message}`;
       }
 
+      if (!textStarted && !fullText && !outputItems.length) {
+        fullText = "[end-pi provider error] Provider stream ended without output.";
+        logErr(`[ep] stream ended without output`);
+      }
       if (textStarted || fullText) {
         await ensureTextItem();
         await finishTextItem(send, textItemId, outputIndex, fullText);
@@ -323,10 +339,11 @@ function responsesInputToPiContext(input: unknown, instructions?: unknown): PiCo
         if (item.type === "function_call") {
           const callId = String(item.call_id ?? item.callId ?? item.id ?? "");
           const remembered = callId ? rememberedToolCalls.get(callId) : undefined;
+          const parsedArgs = parseToolArguments(item.arguments);
           const toolCall = {
             id: callId,
             name: String(item.name ?? remembered?.name ?? ""),
-            arguments: parseToolArguments(item.arguments) || remembered?.arguments || {},
+            arguments: Object.keys(parsedArgs).length ? parsedArgs : remembered?.arguments ?? {},
             thoughtSignature: remembered?.thoughtSignature,
           };
           seenToolCalls.add(callId);
@@ -413,6 +430,11 @@ function assistantContentToResponseOutput(content: AssistantMessage["content"]):
     if (block.type === "toolCall") output.push(functionCallOutputItem(block));
   }
   return output;
+}
+
+function streamErrorMessage(event: unknown): string {
+  const error = (event as any)?.error;
+  return String(error?.errorMessage ?? error?.message ?? error ?? "unknown provider error");
 }
 
 function messageOutputItem(id: string, text: string): ResponseOutputItem {
