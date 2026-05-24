@@ -29,6 +29,14 @@ Codex Desktop understands OpenAI-compatible providers. Pi already knows how to a
 
 ## Install
 
+From Pi:
+
+```bash
+pi install npm:end-pi
+```
+
+Or install the CLI globally with npm:
+
 ```bash
 npm install -g end-pi
 ```
