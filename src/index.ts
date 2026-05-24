@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { serve } from "@hono/node-server";
 import { spawn } from "child_process";
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 import { join } from "path";
@@ -16,6 +16,10 @@ const CODEX_DIR = join(homedir(), ".codex");
 const PID_FILE = join(CODEX_DIR, "end-pi-proxy.pid");
 const LOG_FILE = join(CODEX_DIR, "end-pi.log");
 const ENTRY_FILE = fileURLToPath(import.meta.url);
+const MULTIPASS_PACKAGE = "end-pi-multi-pass";
+const MULTIPASS_GIT_SPEC = "git:github.com/neneee0181/end-pi-multi-pass";
+const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
+const PI_EXTENSIONS_DIR = join(homedir(), ".pi", "agent", "extensions");
 
 async function main() {
   if (args.includes("--proxy-daemon")) {
@@ -30,6 +34,11 @@ async function main() {
 
   if (args.includes("--switch-restore")) {
     await switchToVanilla();
+    return;
+  }
+
+  if (args.includes("setup") || args.includes("--setup") || args.includes("--install-multipass")) {
+    await installMultipass();
     return;
   }
 
@@ -58,6 +67,7 @@ async function main() {
       console.log(`    ${expired ? "✗" : "✓"} ${provider}${expired ? " (expired)" : ""}`);
     }
     console.log(`  Daemon:   ${(await isProxyDaemonRunning()) ? "✓ running" : "✗ stopped"}`);
+    console.log(`  Multi-pass: ${isMultipassInstalled() ? "✓ installed" : "✗ not installed"}`);
     console.log(`  Log:      ~/.codex/end-pi.log`);
     return;
   }
@@ -90,6 +100,7 @@ async function main() {
 
   // Print startup info BEFORE Pi takes over stdout
   console.log(`[ end-pi ] proxy:${PORT} | already active | log: ~/.codex/end-pi.log`);
+  console.log(`[ end-pi ] multipass:${isMultipassInstalled() ? "installed" : "not installed (run 'ep setup')"}`);
 
   launchPiTui();
 }
@@ -134,6 +145,68 @@ function launchPiTui(): void {
   });
 
   process.on("SIGINT", () => pi.kill("SIGINT"));
+}
+
+async function installMultipass(): Promise<void> {
+  console.log(`\n[ end-pi ] Multi-pass companion`);
+  if (isMultipassInstalled()) {
+    console.log(`  ✓ ${MULTIPASS_PACKAGE} is already installed.`);
+    console.log(`  Open Pi with 'ep' and use /subs, /pool, or /mp-preset.\n`);
+    return;
+  }
+
+  console.log(`  Installing ${MULTIPASS_PACKAGE} with Pi...\n`);
+  let code = await runInteractive("pi", ["install", `npm:${MULTIPASS_PACKAGE}`]);
+  if (code !== 0) {
+    console.log(`\n  npm install failed; trying ${MULTIPASS_GIT_SPEC}...\n`);
+    code = await runInteractive("pi", ["install", MULTIPASS_GIT_SPEC]);
+  }
+  if (code !== 0) {
+    throw new Error(`pi install failed with exit code ${code}`);
+  }
+
+  if (isMultipassInstalled()) {
+    console.log(`\n  ✓ ${MULTIPASS_PACKAGE} installed.`);
+    console.log(`  Open Pi with 'ep' and use /subs, /pool, or /mp-preset.\n`);
+    return;
+  }
+
+  console.log(`\n  Install command finished, but the extension was not detected in ~/.pi/agent/extensions.`);
+  console.log(`  Open Pi once, then run 'ep --status' to check again.\n`);
+}
+
+function isMultipassInstalled(): boolean {
+  const extensionDirs = [
+    PI_EXTENSIONS_DIR,
+    join(PI_AGENT_DIR, "npm", "node_modules", MULTIPASS_PACKAGE, "extensions"),
+    join(PI_AGENT_DIR, "git", "github.com", "neneee0181", MULTIPASS_PACKAGE, "extensions"),
+  ];
+
+  return extensionDirs.some(hasMultipassExtension);
+}
+
+function hasMultipassExtension(dir: string): boolean {
+  try {
+    const files = readdirSync(dir, { withFileTypes: true });
+    return files.some((file) => {
+      if (!file.isFile() || !file.name.endsWith(".ts")) return false;
+      const path = join(dir, file.name);
+      const source = readFileSync(path, "utf-8");
+      return source.includes("/mp-preset") && source.includes("/subs") && source.includes("/pool");
+    });
+  } catch {
+    return false;
+  }
+}
+
+function runInteractive(command: string, commandArgs: string[]): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    const child = process.platform === "win32"
+      ? spawn([command, ...commandArgs].join(" "), { stdio: "inherit", shell: true })
+      : spawn(command, commandArgs, { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
 }
 
 async function runProxyDaemon(): Promise<void> {

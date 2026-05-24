@@ -49,6 +49,20 @@ Requirements:
 
 ## Usage
 
+Optional: install the multi-subscription companion extension:
+
+```bash
+ep setup
+```
+
+This installs `end-pi-multi-pass` through Pi when it is missing. After that, opening Pi with `ep` gives you the multi-pass commands:
+
+```text
+/subs
+/pool
+/mp-preset
+```
+
 Start or switch Codex Desktop into Pi-backed mode:
 
 ```bash
@@ -85,6 +99,12 @@ Check status:
 
 ```bash
 ep --status
+```
+
+Install or verify the multi-pass companion extension:
+
+```bash
+ep --install-multipass
 ```
 
 ## Model Switching
