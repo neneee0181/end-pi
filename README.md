@@ -6,11 +6,7 @@ Use Pi providers inside Codex Desktop.
 
 ## Screenshot
 
-Add your Codex Desktop screenshot here before publishing:
-
 ![Codex Desktop using end-pi](assets/codex-desktop.png)
-
-Recommended image path: `assets/codex-desktop.png`
 
 ## Why
 
@@ -127,4 +123,3 @@ Proxy logs are written to:
 - If the selected Pi provider token is expired, `end-pi` tries to refresh it automatically.
 - If refresh fails, re-authenticate that provider in Pi or switch to another provider/model.
 - The proxy ignores Codex's placeholder model id and always uses Pi's current model selection.
-
