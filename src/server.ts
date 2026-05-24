@@ -540,6 +540,9 @@ function annotateToolOutput(output: string): string {
   if (/Process running with session ID/i.test(output) && /Original token count:\s*0/i.test(output)) {
     notes.push("end-pi note: this background command has produced no output; do not keep polling it repeatedly. Try a quick local command or explain the blockage.");
   }
+  if (/Process exited with code 1/i.test(output) && /Original token count:\s*0/i.test(output)) {
+    notes.push("end-pi note: this command returned no matches. Do not treat one exact search as exhaustive; retry with case-insensitive, naming variants, file-name search, or a broader directory-specific query before concluding absent.");
+  }
   if (/(?:The term '.+' is not recognized|is not recognized as a name of a cmdlet|command not found|npm error code EACCES|npm ERR! code EACCES|permission denied|access denied)/i.test(output)) {
     notes.push("end-pi note: this command failed because the executable or permission is unavailable. Do not retry the same command unchanged; choose an available tool, use a local fallback, or explain the blockage.");
   }
