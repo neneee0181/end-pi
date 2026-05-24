@@ -19,6 +19,15 @@ type ProxyStreamFn = typeof piStream;
 type ResponseOutputItem = Record<string, unknown>;
 type RememberedToolCall = { id: string; name: string; arguments: Record<string, unknown>; thoughtSignature?: string };
 
+const AGENT_BRIDGE_PROMPT = [
+  "end-pi agent bridge:",
+  "- Preserve Codex developer/system/project instructions as authoritative operating context.",
+  "- Use the provided tools to inspect the real workspace before answering project-specific questions.",
+  "- Treat a single exact search miss as non-exhaustive; broaden with case variants, naming variants, file-name search, and likely subdirectories.",
+  "- If a tool is unavailable or a command is stuck, do not repeat it unchanged; choose an available fallback or explain the blockage.",
+  "- Keep tool calls grounded in the current working directory from the latest environment context unless the user specifies another path.",
+].join("\n");
+
 // Log to file, not stdout (Pi TUI owns stdout)
 const CODEX_DIR = join(homedir(), ".codex");
 const REQUEST_LOG_DIR = join(CODEX_DIR, "end-pi-requests");
@@ -33,6 +42,7 @@ const writeLog = (prefix: string, args: unknown[]) => {
 const log = (...args: unknown[]) => writeLog("", args);
 const logErr = (...args: unknown[]) => writeLog("ERR ", args);
 const rememberedToolCalls = new Map<string, RememberedToolCall>();
+const toolNameAliases = new Map<string, string>();
 
 export const app = new Hono();
 
@@ -326,16 +336,13 @@ function stripMultipassSuffix(provider: string): string {
 }
 
 function responsesInputToPiContext(input: unknown, instructions?: unknown): PiContext {
-  const systemPrompt = typeof instructions === "string" ? instructions : undefined;
+  const systemParts = [typeof instructions === "string" ? instructions : undefined, AGENT_BRIDGE_PROMPT].filter(Boolean) as string[];
   if (typeof input === "string") {
-    return { systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() } as UserMessage] };
+    return { systemPrompt: systemParts.join("\n\n"), messages: [{ role: "user", content: input, timestamp: Date.now() } as UserMessage] };
   }
-  if (!Array.isArray(input)) return { systemPrompt, messages: [] };
+  if (!Array.isArray(input)) return { systemPrompt: systemParts.join("\n\n"), messages: [] };
   const seenToolCalls = new Set<string>();
-  return {
-    systemPrompt,
-    messages: input
-      .flatMap((item: any): Message[] => {
+  const messages = input.flatMap((item: any): Message[] => {
         if (item.type === "function_call_output") {
           const callId = String(item.call_id ?? item.callId ?? item.id ?? "");
           const remembered = callId ? rememberedToolCalls.get(callId) : undefined;
@@ -368,13 +375,21 @@ function responsesInputToPiContext(input: unknown, instructions?: unknown): PiCo
           return [toolCallToAssistantMessage(toolCall)];
         }
         if (item.type !== "message") return [];
+        if (item.role === "system" || item.role === "developer") {
+          const text = responsePartsToText(item.content);
+          if (text) systemParts.push(text);
+          return [];
+        }
         const content = responsePartsToPiContent(item.content);
         if (item.role === "assistant") {
           const text = content.filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
           return [{ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now(), api: "openai-responses" as any, provider: "openai" as any, model: "", usage: emptyUsage(), stopReason: "stop" as any } as AssistantMessage];
         }
         return [{ role: "user", content: content.length === 1 && content[0].type === "text" ? content[0].text : content, timestamp: Date.now() } as UserMessage];
-      }) as Message[],
+      }) as Message[];
+  return {
+    systemPrompt: systemParts.join("\n\n"),
+    messages,
   };
 }
 
@@ -408,6 +423,18 @@ function responsePartsToPiContent(content: unknown): PiUserContentPart[] {
   return parts.length ? parts : [{ type: "text", text: "" }];
 }
 
+function responsePartsToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content ?? "");
+  return content
+    .map((part: any) => {
+      if (part.type === "input_text" || part.type === "output_text" || part.type === "text") return String(part.text ?? "");
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function chatPartsToPiContent(content: unknown): PiUserContentPart[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   if (!Array.isArray(content)) return [{ type: "text", text: String(content ?? "") }];
@@ -428,16 +455,45 @@ function imageUrlToPiContent(imageUrl: unknown): PiUserContentPart[] {
 
 function responseToolsToPiTools(tools: unknown): PiContext["tools"] {
   if (!Array.isArray(tools)) return [];
-  return tools.flatMap((tool: any) => {
-    const fn = tool.function ?? tool;
-    const name = fn.name ?? tool.name ?? (tool.type && tool.type !== "function" ? tool.type : undefined);
-    if (!name) return [];
-    return [{
-      name: String(name),
-      description: String(fn.description ?? tool.description ?? ""),
-      parameters: fn.parameters ?? tool.parameters ?? tool.input_schema ?? { type: "object", properties: {} },
-    }];
-  });
+  toolNameAliases.clear();
+  return tools.flatMap((tool: any) => responseToolToPiTools(tool));
+}
+
+function responseToolToPiTools(tool: any, namespace?: string): NonNullable<PiContext["tools"]> {
+  if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
+    return tool.tools.flatMap((nested: any) => responseToolToPiTools(nested, String(tool.name ?? "")));
+  }
+
+  const fn = tool.function ?? tool;
+  const rawName = fn.name ?? tool.name ?? (tool.type && tool.type !== "function" ? tool.type : undefined);
+  if (!rawName) return [];
+
+  const originalName = namespace ? `${namespace}.${String(rawName)}` : String(rawName);
+  const safeName = toSafeToolName(originalName);
+  toolNameAliases.set(safeName, originalName);
+
+  return [{
+    name: safeName,
+    description: [
+      namespace ? `Codex namespace: ${namespace}.` : "",
+      String(fn.description ?? tool.description ?? ""),
+    ].filter(Boolean).join(" "),
+    parameters: fn.parameters ?? tool.parameters ?? tool.input_schema ?? { type: "object", properties: {} },
+  }];
+}
+
+function toSafeToolName(name: string): string {
+  const safe = name.replace(/[^a-zA-Z0-9_-]/g, "__");
+  if (safe.length <= 64) return safe;
+  return `${safe.slice(0, 51)}_${shortHash(name)}`;
+}
+
+function shortHash(value: string): string {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = Math.imul(31, hash) + value.charCodeAt(i) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function assistantContentToResponseOutput(content: AssistantMessage["content"]): ResponseOutputItem[] {
@@ -462,9 +518,10 @@ function messageOutputItem(id: string, text: string): ResponseOutputItem {
 function functionCallOutputItem(toolCall: any): ResponseOutputItem {
   const args = JSON.stringify(toolCall.arguments ?? {});
   const callId = toolCall.id || `call_${Date.now()}`;
+  const responseToolName = toolNameAliases.get(toolCall.name) ?? toolCall.name;
   rememberedToolCalls.set(callId, {
     id: callId,
-    name: toolCall.name,
+    name: responseToolName,
     arguments: toolCall.arguments ?? {},
     thoughtSignature: toolCall.thoughtSignature,
   });
@@ -472,7 +529,7 @@ function functionCallOutputItem(toolCall: any): ResponseOutputItem {
     id: `fc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     type: "function_call",
     call_id: callId,
-    name: toolCall.name,
+    name: responseToolName,
     arguments: args,
     status: "completed",
   };
