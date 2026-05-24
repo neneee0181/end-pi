@@ -39,6 +39,11 @@ async function main() {
     return;
   }
 
+  if (args.includes("--version") || args.includes("-v")) {
+    console.log(getCurrentPackageVersion() ?? "unknown");
+    return;
+  }
+
   if (!args.includes("--no-update")) {
     const updated = await maybeSelfUpdate();
     if (updated) return;
@@ -337,6 +342,7 @@ async function runProxyDaemon(): Promise<void> {
 
 async function ensureProxyDaemon(): Promise<void> {
   if (await isProxyDaemonRunning()) return;
+  cleanupStaleProxyDaemon();
 
   const child = spawn(process.execPath, selfArgs("--proxy-daemon"), {
     detached: true,
@@ -351,6 +357,26 @@ async function ensureProxyDaemon(): Promise<void> {
   }
 
   throw new Error("Proxy daemon did not start. Run 'ep --status' or check ~/.codex/end-pi.log.");
+}
+
+function cleanupStaleProxyDaemon(): void {
+  try {
+    if (!existsSync(PID_FILE)) return;
+    const pid = Number.parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      unlinkSync(PID_FILE);
+      return;
+    }
+    try {
+      process.kill(pid, "SIGTERM");
+      daemonLog(`stale daemon pid=${pid} terminated`);
+    } catch {
+      daemonLog(`stale daemon pid=${pid} not running`);
+    }
+    unlinkSync(PID_FILE);
+  } catch (error: any) {
+    daemonLog(`stale daemon cleanup failed: ${error?.message ?? error}`);
+  }
 }
 
 function selfArgs(...nextArgs: string[]): string[] {
