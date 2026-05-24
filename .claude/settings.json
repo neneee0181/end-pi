@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fs=require('fs'),{execFileSync}=require('child_process');try{const o=execFileSync('git',['status','--porcelain'],{encoding:'utf8',stdio:['ignore','pipe','ignore']});if(o.trim()){const files=o.trim().split(/\\r?\\n/).map(l=>l.slice(3).trim()).filter(Boolean).slice(0,8).join(', ');fs.writeFileSync('.memoc/.pending',new Date().toISOString()+'\\n'+files)}}catch{}\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+<!-- memoc:header:start -->
+# end-pi
+
+> LLM-facing project map for this project.
+<!-- memoc:header:end -->
+
+This file is a map, not a startup read. Start from the entry-file protocol and open only what the task needs.
+
+## Core
+
+<!-- memoc:core:start -->
+- [Session Summary](.memoc/session-summary.md): only required startup read.
+- [Current State](.memoc/02-current-project-state.md): status, tasks, commands.
+- [Handoff](.memoc/04-handoff.md): resume context, blockers, verification.
+- [Rules](.memoc/06-project-rules.md): durable preferences.
+- [Agent Index](.memoc/00-agent-index.md): compact file map.
+- [Project Brief](.memoc/00-project-brief.md): short identity and direction.
+- [Workflow](.memoc/01-agent-workflow.md): update trigger matrix.
+- [Decisions](.memoc/03-decisions.md): durable decisions.
+- [Project Wiki](.memoc/wiki/project/README.md): repo implementation docs.
+- [Knowledge Wiki](.memoc/wiki/knowledge/README.md): external sources, concepts, glossary.
+- [Activity](.memoc/activity.md): generated worklog index.
+- [Raw Sources](.memoc/raw/README.md): immutable source material; do not read by default.
+- [Wiki](.memoc/wiki/index.md): project/knowledge wiki hub.
+<!-- memoc:core:end -->
+
+## Project Wiki
+
+<!-- memoc:systems:start -->
+_None yet._
+<!-- memoc:systems:end -->
+
+## Knowledge Wiki
+
+<!-- memoc:wiki:start -->
+_None yet._
+<!-- memoc:wiki:end -->
+
+## Optional
+
+- [AGENTS.md](AGENTS.md): Codex entry file.
+- [CLAUDE.md](CLAUDE.md): Claude Code entry file.
+- [Project Memory Maintainer](skills/project-memory-maintainer/SKILL.md): local maintenance skill.

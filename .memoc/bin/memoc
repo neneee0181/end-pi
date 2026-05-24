@@ -1,0 +1,11 @@
+#!/bin/sh
+if [ -n "$MEMOC_RUNTIME_DIR" ]; then
+  memoc_runtime="$MEMOC_RUNTIME_DIR"
+else
+  memoc_runtime="${HOME:-$PWD}/.local/share/memoc/runtime"
+fi
+memoc_cli="$memoc_runtime/bin/cli.js"
+if [ -f "$memoc_cli" ]; then
+  exec node "$memoc_cli" "$@"
+fi
+exec npx @kevin0181/memoc@latest "$@"
