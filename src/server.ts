@@ -10,7 +10,7 @@ import {
   isAntigravityProvider,
   streamAntigravityDirect,
 } from "./antigravity.js";
-import { createWriteStream, mkdirSync, writeFileSync } from "fs";
+import { createWriteStream, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -622,9 +622,30 @@ function logRequestBody(body: unknown, info: string): void {
     mkdirSync(REQUEST_LOG_DIR, { recursive: true });
     const file = join(REQUEST_LOG_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
     writeFileSync(file, JSON.stringify({ info, body: sanitizeForLog(body) }, null, 2), "utf-8");
+    rotateRequestLogs();
   } catch (error: any) {
     logErr(`[ep] request log failed:`, error?.message ?? error);
   }
+}
+
+function rotateRequestLogs(): void {
+  const keep = parseRequestLogKeep();
+  if (keep < 0) return;
+  try {
+    const requests = readdirSync(REQUEST_LOG_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .sort();
+    for (const name of requests.slice(0, Math.max(0, requests.length - keep))) {
+      unlinkSync(join(REQUEST_LOG_DIR, name));
+    }
+  } catch (error: any) {
+    logErr(`[ep] request log rotation failed:`, error?.message ?? error);
+  }
+}
+
+function parseRequestLogKeep(): number {
+  const raw = Number.parseInt(String(process.env.END_PI_REQUEST_LOG_KEEP ?? "200"), 10);
+  return Number.isInteger(raw) ? raw : 200;
 }
 
 function sanitizeForLog(value: unknown, depth = 0): unknown {
@@ -643,3 +664,11 @@ function sanitizeForLog(value: unknown, depth = 0): unknown {
   }
   return out;
 }
+
+export const __test = {
+  annotateToolOutput,
+  responsePartsToPiContent,
+  responsesInputToPiContext,
+  responseToolsToPiTools,
+  toSafeToolName,
+};

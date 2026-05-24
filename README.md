@@ -110,7 +110,9 @@ Run diagnostics:
 ```bash
 ep doctor
 ep doctor --fix
+ep doctor --json
 ep smoke
+ep smoke --matrix
 ```
 
 `ep doctor` checks Node, Pi, Codex config, provider auth, active model, daemon health, endpoint health, multi-pass, and recent request logs. `--fix` only repairs the active `end-pi` proxy/endpoint; it does not switch native Codex into `end-pi` mode by itself.
@@ -122,7 +124,11 @@ ep logs
 ep logs --last-request
 ep logs --requests
 ep logs --lines=200
+ep logs --clean
+ep logs --clean --keep=100
 ```
+
+`end-pi` automatically rotates request snapshots and keeps the newest 200 by default. Set `END_PI_REQUEST_LOG_KEEP` to change that limit.
 
 Install or verify the multi-pass companion extension:
 
@@ -175,6 +181,8 @@ Request snapshots are written to:
 ~/.codex/end-pi-requests/
 ```
 
+Request snapshots are sanitized before writing. Large base64 image payloads are replaced with `[image-data:...]`, and token-like fields are redacted.
+
 For smoke tests and troubleshooting, see:
 
 - [Regression checklist](./docs/REGRESSION.md)
@@ -185,3 +193,11 @@ For smoke tests and troubleshooting, see:
 - If the selected Pi provider token is expired, `end-pi` tries to refresh it automatically.
 - If refresh fails, re-authenticate that provider in Pi or switch to another provider/model.
 - The proxy ignores Codex's placeholder model id and always uses Pi's current model selection.
+
+## Known Limitations
+
+- Provider behavior varies. Some Pi models follow tool calls well; others may answer directly or need a different model.
+- Vision only works when the selected Pi provider/model accepts image input.
+- `end-pi` translates Codex tool requests, but Codex Desktop still owns actual tool execution.
+- Codex Desktop and Responses request shapes can change, so run `ep doctor`, `ep smoke`, and `npm test` after upgrading.
+- macOS and Linux launch detection should be verified with `ep doctor` on each target environment.

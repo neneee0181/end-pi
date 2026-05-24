@@ -25,6 +25,21 @@ const MULTIPASS_GIT_SPEC = process.env.END_PI_MULTIPASS_GIT;
 const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
 const PI_EXTENSIONS_DIR = join(homedir(), ".pi", "agent", "extensions");
 
+type DoctorCheck = { name: string; ok: boolean; detail: string; hint?: string };
+type DoctorReport = {
+  service: "end-pi";
+  version: string | null;
+  platform: NodeJS.Platform;
+  arch: string;
+  node: string;
+  endpoint: string;
+  proxyActive: boolean;
+  daemonRunning: boolean;
+  paths: { codexDir: string; logFile: string; requestLogDir: string };
+  recentRequestLogs: string[];
+  checks: DoctorCheck[];
+};
+
 async function main() {
   if (args.includes("--proxy-daemon")) {
     await runProxyDaemon();
@@ -141,6 +156,11 @@ async function main() {
 function printLogs(): void {
   const linesArg = args.find((arg) => /^--lines=\d+$/.test(arg));
   const lines = linesArg ? Number(linesArg.split("=")[1]) : 120;
+  if (args.includes("--clean")) {
+    cleanRequestLogs(parseKeepArg(100));
+    return;
+  }
+
   console.log(`\n[ end-pi ] Logs`);
   console.log(`  Main:     ${LOG_FILE}`);
   console.log(`  Requests: ${REQUEST_LOG_DIR}\n`);
@@ -223,6 +243,26 @@ function getRecentRequestLogs(limit: number): string[] {
   }
 }
 
+function cleanRequestLogs(keep: number): void {
+  try {
+    const requests = readdirSync(REQUEST_LOG_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .sort();
+    const remove = requests.slice(0, Math.max(0, requests.length - keep));
+    for (const name of remove) unlinkSync(join(REQUEST_LOG_DIR, name));
+    console.log(`[ end-pi ] cleaned request logs: removed=${remove.length}, kept=${requests.length - remove.length}`);
+    console.log(`  Requests: ${REQUEST_LOG_DIR}`);
+  } catch {
+    console.log("[ end-pi ] no request logs found.");
+  }
+}
+
+function parseKeepArg(defaultValue: number): number {
+  const keepArg = args.find((arg) => /^--keep=\d+$/.test(arg));
+  const keep = keepArg ? Number(keepArg.split("=")[1]) : defaultValue;
+  return Number.isInteger(keep) && keep >= 0 ? keep : defaultValue;
+}
+
 function summarizeToolArgs(raw: unknown): string {
   try {
     const value = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -239,48 +279,80 @@ function summarizeToolArgs(raw: unknown): string {
 }
 
 async function runDoctor(fix: boolean): Promise<void> {
-  const checks: { name: string; ok: boolean; detail: string; hint?: string }[] = [];
+  let report = await buildDoctorReport();
+
+  if (fix && report.proxyActive) {
+    try {
+      const fixedPort = await ensureProxyDaemon();
+      await applyProxy(fixedPort);
+      setUserEnv("EP_API_KEY", "end-pi-local");
+      if (!args.includes("--json")) console.log(`[ end-pi ] doctor --fix: proxy ensured on ${fixedPort}`);
+      report = await buildDoctorReport();
+    } catch (error: any) {
+      if (!args.includes("--json")) console.log(`[ end-pi ] doctor --fix failed: ${error?.message ?? error}`);
+    }
+  }
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log(`\n[ end-pi ] Doctor`);
+  for (const check of report.checks) {
+    console.log(`  ${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`);
+    if (!check.ok && check.hint) console.log(`      hint: ${check.hint}`);
+  }
+  console.log(`\n  Logs: ep logs --last-request | ep logs --requests | ep logs --lines=200 | ep logs --clean`);
+  console.log(`  Smoke tests: ep smoke | ep smoke --matrix`);
+}
+
+async function buildDoctorReport(): Promise<DoctorReport> {
+  const checks: DoctorCheck[] = [];
   const port = readSavedProxyPort();
   const active = isProxyActive();
   const daemon = await isProxyDaemonRunning(port);
   const auth = await readPiAuth().catch(() => null);
   const settings = await readPiSettings().catch(() => null);
   const nodeOk = compareVersions(process.versions.node, "22.19.0") >= 0;
+  const piFound = commandExists("pi");
+  const launchTarget = findCodexLaunchTarget();
+  const multipass = isMultipassInstalled();
+  const activeTokenCount = auth ? Object.values(auth).filter((entry) => !isTokenExpired(entry)).length : 0;
 
   checks.push({ name: "Node", ok: nodeOk, detail: process.versions.node, hint: "Install Node.js 22.19 or newer." });
-  checks.push({ name: "Pi CLI", ok: commandExists("pi"), detail: commandExists("pi") ? "found" : "missing", hint: "Install Pi and authenticate providers." });
+  checks.push({ name: "Pi CLI", ok: piFound, detail: piFound ? "found" : "missing", hint: "Install Pi and authenticate providers." });
   checks.push({ name: "Codex config", ok: existsSync(join(CODEX_DIR, "config.toml")), detail: join(CODEX_DIR, "config.toml"), hint: "Open Codex Desktop once before running ep." });
-  checks.push({ name: "Codex launch target", ok: Boolean(findCodexLaunchTarget()) || process.platform !== "win32", detail: findCodexLaunchTarget() ?? "not detected", hint: "Install or open Codex Desktop once." });
+  checks.push({ name: "Codex launch target", ok: Boolean(launchTarget) || process.platform !== "win32", detail: launchTarget ?? "not detected", hint: "Install or open Codex Desktop once." });
   checks.push({ name: "Pi auth", ok: Boolean(auth), detail: auth ? `${Object.keys(auth).length} provider(s)` : "missing", hint: "Run pi and log in to at least one provider." });
   checks.push({ name: "Pi model", ok: Boolean(settings?.defaultProvider && settings?.defaultModel), detail: `${settings?.defaultProvider ?? "?"}/${settings?.defaultModel ?? "?"}`, hint: "Use /model in Pi TUI." });
-  checks.push({ name: "Active tokens", ok: Boolean(auth && Object.values(auth).some((entry) => !isTokenExpired(entry))), detail: auth ? `${Object.values(auth).filter((entry) => !isTokenExpired(entry)).length} active` : "unknown", hint: "Re-auth expired providers in Pi." });
+  checks.push({ name: "Active tokens", ok: activeTokenCount > 0, detail: auth ? `${activeTokenCount} active` : "unknown", hint: "Re-auth expired providers in Pi." });
   checks.push({ name: "Codex provider", ok: active, detail: active ? "end-pi active" : "native Codex", hint: "Run ep to switch Codex into end-pi mode." });
   checks.push({ name: "Proxy daemon", ok: daemon, detail: daemon ? `running on ${port}` : "stopped", hint: active ? "Run ep doctor --fix or ep." : "Run ep when ready to switch." });
   checks.push({ name: "Endpoint", ok: daemon ? await endpointHealthy(port) : true, detail: daemon ? `http://localhost:${port}/health` : "skipped (daemon stopped)", hint: "Check port conflict or stale daemon." });
-  checks.push({ name: "Multi-pass", ok: isMultipassInstalled(), detail: isMultipassInstalled() ? "installed" : "not installed", hint: "Run ep setup if you want /subs, /pool, /mp-preset." });
+  checks.push({ name: "Multi-pass", ok: multipass, detail: multipass ? "installed" : "not installed", hint: "Run ep setup if you want /subs, /pool, /mp-preset." });
   checks.push({ name: "Request logs", ok: true, detail: `${getRecentRequestLogs(5).length} recent`, hint: "Use ep logs --last-request after a failed Codex turn." });
 
-  if (fix && active) {
-    try {
-      const fixedPort = await ensureProxyDaemon();
-      await applyProxy(fixedPort);
-      setUserEnv("EP_API_KEY", "end-pi-local");
-      console.log(`[ end-pi ] doctor --fix: proxy ensured on ${fixedPort}`);
-    } catch (error: any) {
-      console.log(`[ end-pi ] doctor --fix failed: ${error?.message ?? error}`);
-    }
-  }
-
-  console.log(`\n[ end-pi ] Doctor`);
-  for (const check of checks) {
-    console.log(`  ${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`);
-    if (!check.ok && check.hint) console.log(`      hint: ${check.hint}`);
-  }
-  console.log(`\n  Logs: ep logs --last-request | ep logs --requests | ep logs --lines=200`);
-  console.log(`  Smoke tests: ep smoke`);
+  return {
+    service: "end-pi",
+    version: getCurrentPackageVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    node: process.versions.node,
+    endpoint: `http://localhost:${port}/v1`,
+    proxyActive: active,
+    daemonRunning: daemon,
+    paths: { codexDir: CODEX_DIR, logFile: LOG_FILE, requestLogDir: REQUEST_LOG_DIR },
+    recentRequestLogs: getRecentRequestLogs(10).map((name) => join(REQUEST_LOG_DIR, name)),
+    checks,
+  };
 }
 
 function printSmokeChecklist(): void {
+  if (args.includes("--matrix")) {
+    printSmokeMatrix();
+    return;
+  }
   console.log(`\n[ end-pi ] Smoke checklist`);
   console.log(`  1. ep --version`);
   console.log(`  2. ep --status --no-update`);
@@ -293,6 +365,23 @@ function printSmokeChecklist(): void {
   console.log(`  9. ep logs --last-request after any failure.`);
   console.log(`\n  Full checklist: docs/REGRESSION.md`);
   console.log(`  Troubleshooting: docs/TROUBLESHOOTING.md`);
+}
+
+function printSmokeMatrix(): void {
+  console.log(`\n[ end-pi ] Smoke matrix`);
+  console.log(`  Run this once per Pi /model provider you care about:\n`);
+  console.log(`  Provider/model      text   tools   image   restore   logs`);
+  console.log(`  ------------------  -----  ------  ------  --------  ----`);
+  console.log(`  Anthropic/Claude    [ ]    [ ]     [ ]     [ ]       [ ]`);
+  console.log(`  OpenAI/Copilot      [ ]    [ ]     [ ]     [ ]       [ ]`);
+  console.log(`  Google/Gemini       [ ]    [ ]     [ ]     [ ]       [ ]`);
+  console.log(`  Antigravity         [ ]    [ ]     [ ]     [ ]       [ ]`);
+  console.log(`  Other Pi provider   [ ]    [ ]     [ ]     [ ]       [ ]\n`);
+  console.log(`  Text:    ask "what model are you using?"`);
+  console.log(`  Tools:   ask Codex to find a real symbol in the workspace`);
+  console.log(`  Image:   attach a small image and ask what text is visible`);
+  console.log(`  Restore: run ep --restore, then ep`);
+  console.log(`  Logs:    run ep logs --last-request after a failure`);
 }
 
 function commandExists(command: string): boolean {

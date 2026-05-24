@@ -4,6 +4,7 @@
 
 ```bash
 ep doctor
+ep doctor --json
 ```
 
 If Codex is already in `end-pi` mode and the proxy looks broken:
@@ -61,6 +62,12 @@ ep logs --last-request
 
 Look for recent `function_call` entries. If no tool calls appear, the selected provider/model may not follow tool instructions well. Try another Pi model.
 
+If logs are noisy or too old:
+
+```bash
+ep logs --clean --keep=100
+```
+
 ## Search says something is absent but you know it exists
 
 Ask with broader names, or include likely directory names. `end-pi` also nudges models to broaden exact failed searches with case variants, file-name search, and likely subdirectories.
@@ -72,6 +79,17 @@ Confirm:
 - Model supports vision.
 - Request log shows `[image-data:...]` in `~/.codex/end-pi-requests`.
 - The selected provider accepts Pi image content.
+
+## Automated checks
+
+For local development, run:
+
+```bash
+npm test
+ep smoke --matrix
+```
+
+`npm test` checks the Codex-to-Pi transform layer. `ep smoke --matrix` prints a provider checklist for manual verification across Pi models.
 
 ## `ep --restore` does not reopen Codex
 

@@ -8,15 +8,20 @@ Run these after release changes or provider/tool bridge changes.
 ep --version
 ep --status --no-update
 ep doctor --no-update
+ep doctor --json --no-update
 ep smoke --no-update
+ep smoke --matrix --no-update
 ep logs --last-request
+npm test
 ```
 
 Expected:
 
 - Version matches `package.json`.
 - Doctor shows Node, Pi CLI, Codex config, Pi auth, Pi model, endpoint, and logs.
+- JSON doctor output is valid JSON and contains no tokens/secrets.
 - `ep logs --last-request` prints a summary without secrets.
+- Transform tests pass after build.
 
 ## Switch flow
 
@@ -72,6 +77,12 @@ Expected:
 
 ## Provider matrix
 
+Print the matrix helper:
+
+```bash
+ep smoke --matrix
+```
+
 Repeat one short tool task and one image task after switching Pi `/model` across:
 
 - Claude/Anthropic-compatible provider
@@ -97,3 +108,16 @@ Expected:
 - Codex returns to native provider.
 - Conversation history remains available.
 - Proxy daemon stops.
+
+## Log hygiene
+
+```bash
+ep logs --requests
+ep logs --clean --keep=100
+ep logs --requests
+```
+
+Expected:
+
+- Old request snapshots are removed.
+- Recent sanitized request snapshots remain available.
