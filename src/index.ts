@@ -173,7 +173,7 @@ async function maybeSelfUpdate(): Promise<boolean> {
   }
 
   console.log(`[ end-pi ] updated to ${latestVersion}. Restarting command...\n`);
-  const restart = spawnSync(process.execPath, [ENTRY_FILE, ...args.filter((arg) => arg !== "--no-update")], {
+  const restart = spawnSync(process.execPath, selfArgs(...args.filter((arg) => arg !== "--no-update")), {
     stdio: "inherit",
     env: { ...process.env, EP_SKIP_UPDATE: "1" },
     windowsHide: true,
@@ -224,7 +224,7 @@ async function switchToVanilla(): Promise<void> {
 }
 
 function startTransition(mode: "--switch-proxy" | "--switch-restore"): void {
-  const child = spawn(process.execPath, [ENTRY_FILE, mode], {
+  const child = spawn(process.execPath, selfArgs(mode), {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -338,7 +338,7 @@ async function runProxyDaemon(): Promise<void> {
 async function ensureProxyDaemon(): Promise<void> {
   if (await isProxyDaemonRunning()) return;
 
-  const child = spawn(process.execPath, [ENTRY_FILE, "--proxy-daemon"], {
+  const child = spawn(process.execPath, selfArgs("--proxy-daemon"), {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -351,6 +351,14 @@ async function ensureProxyDaemon(): Promise<void> {
   }
 
   throw new Error("Proxy daemon did not start. Run 'ep --status' or check ~/.codex/end-pi.log.");
+}
+
+function selfArgs(...nextArgs: string[]): string[] {
+  if (ENTRY_FILE.endsWith(".ts")) {
+    const tsxCli = join(dirname(ENTRY_FILE), "..", "node_modules", "tsx", "dist", "cli.mjs");
+    if (existsSync(tsxCli)) return [tsxCli, ENTRY_FILE, ...nextArgs];
+  }
+  return [ENTRY_FILE, ...nextArgs];
 }
 
 async function isProxyDaemonRunning(): Promise<boolean> {
