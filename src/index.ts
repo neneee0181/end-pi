@@ -61,6 +61,16 @@ async function main() {
     return;
   }
 
+  if (args.includes("doctor") || args.includes("--doctor")) {
+    await runDoctor(args.includes("--fix"));
+    return;
+  }
+
+  if (args.includes("smoke") || args.includes("--smoke")) {
+    printSmokeChecklist();
+    return;
+  }
+
   if (args.includes("--restore") || args.includes("--resotre") || args.includes("-r")) {
     console.log("\n[ end-pi ] Restoring Codex to vanilla...\n");
     if (!isProxyActive()) {
@@ -135,6 +145,16 @@ function printLogs(): void {
   console.log(`  Main:     ${LOG_FILE}`);
   console.log(`  Requests: ${REQUEST_LOG_DIR}\n`);
 
+  if (args.includes("--requests")) {
+    printRequestLogs();
+    return;
+  }
+
+  if (args.includes("--last-request")) {
+    printLastRequestSummary();
+    return;
+  }
+
   try {
     const log = readFileSync(LOG_FILE, "utf-8").split(/\r?\n/).filter(Boolean);
     for (const line of log.slice(-lines)) console.log(line);
@@ -153,6 +173,140 @@ function printLogs(): void {
     }
   } catch {
     // No request logs yet.
+  }
+}
+
+function printRequestLogs(): void {
+  const requests = getRecentRequestLogs(20);
+  if (!requests.length) {
+    console.log("  No request logs found.");
+    return;
+  }
+  for (const name of requests) console.log(`  ${join(REQUEST_LOG_DIR, name)}`);
+}
+
+function printLastRequestSummary(): void {
+  const [latest] = getRecentRequestLogs(1).reverse();
+  if (!latest) {
+    console.log("  No request logs found.");
+    return;
+  }
+  const file = join(REQUEST_LOG_DIR, latest);
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf-8"));
+    const body = parsed.body ?? {};
+    const calls = Array.isArray(body.input)
+      ? body.input.filter((item: any) => item?.type === "function_call").slice(-8)
+      : [];
+    console.log(`  File:  ${file}`);
+    console.log(`  Model: ${body.model ?? "unknown"}`);
+    console.log(`  Stream: ${String(body.stream ?? false)}`);
+    console.log(`  Tools: ${Array.isArray(body.tools) ? body.tools.length : 0}`);
+    console.log(`  Calls: ${calls.length}`);
+    for (const call of calls) {
+      const args = summarizeToolArgs(call.arguments);
+      console.log(`    - ${call.name ?? "tool"} ${args}`);
+    }
+  } catch (error: any) {
+    console.log(`  Failed to read ${file}: ${error?.message ?? error}`);
+  }
+}
+
+function getRecentRequestLogs(limit: number): string[] {
+  try {
+    return readdirSync(REQUEST_LOG_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .slice(-limit);
+  } catch {
+    return [];
+  }
+}
+
+function summarizeToolArgs(raw: unknown): string {
+  try {
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!value || typeof value !== "object") return "";
+    const out: Record<string, unknown> = {};
+    for (const key of ["cmd", "command", "workdir", "path", "session_id", "chars", "yield_time_ms"]) {
+      if (key in value) out[key] = (value as any)[key];
+    }
+    const text = JSON.stringify(out);
+    return text.length > 220 ? `${text.slice(0, 220)}...` : text;
+  } catch {
+    return typeof raw === "string" ? raw.slice(0, 220) : "";
+  }
+}
+
+async function runDoctor(fix: boolean): Promise<void> {
+  const checks: { name: string; ok: boolean; detail: string; hint?: string }[] = [];
+  const port = readSavedProxyPort();
+  const active = isProxyActive();
+  const daemon = await isProxyDaemonRunning(port);
+  const auth = await readPiAuth().catch(() => null);
+  const settings = await readPiSettings().catch(() => null);
+  const nodeOk = compareVersions(process.versions.node, "22.19.0") >= 0;
+
+  checks.push({ name: "Node", ok: nodeOk, detail: process.versions.node, hint: "Install Node.js 22.19 or newer." });
+  checks.push({ name: "Pi CLI", ok: commandExists("pi"), detail: commandExists("pi") ? "found" : "missing", hint: "Install Pi and authenticate providers." });
+  checks.push({ name: "Codex config", ok: existsSync(join(CODEX_DIR, "config.toml")), detail: join(CODEX_DIR, "config.toml"), hint: "Open Codex Desktop once before running ep." });
+  checks.push({ name: "Codex launch target", ok: Boolean(findCodexLaunchTarget()) || process.platform !== "win32", detail: findCodexLaunchTarget() ?? "not detected", hint: "Install or open Codex Desktop once." });
+  checks.push({ name: "Pi auth", ok: Boolean(auth), detail: auth ? `${Object.keys(auth).length} provider(s)` : "missing", hint: "Run pi and log in to at least one provider." });
+  checks.push({ name: "Pi model", ok: Boolean(settings?.defaultProvider && settings?.defaultModel), detail: `${settings?.defaultProvider ?? "?"}/${settings?.defaultModel ?? "?"}`, hint: "Use /model in Pi TUI." });
+  checks.push({ name: "Active tokens", ok: Boolean(auth && Object.values(auth).some((entry) => !isTokenExpired(entry))), detail: auth ? `${Object.values(auth).filter((entry) => !isTokenExpired(entry)).length} active` : "unknown", hint: "Re-auth expired providers in Pi." });
+  checks.push({ name: "Codex provider", ok: active, detail: active ? "end-pi active" : "native Codex", hint: "Run ep to switch Codex into end-pi mode." });
+  checks.push({ name: "Proxy daemon", ok: daemon, detail: daemon ? `running on ${port}` : "stopped", hint: active ? "Run ep doctor --fix or ep." : "Run ep when ready to switch." });
+  checks.push({ name: "Endpoint", ok: daemon ? await endpointHealthy(port) : true, detail: daemon ? `http://localhost:${port}/health` : "skipped (daemon stopped)", hint: "Check port conflict or stale daemon." });
+  checks.push({ name: "Multi-pass", ok: isMultipassInstalled(), detail: isMultipassInstalled() ? "installed" : "not installed", hint: "Run ep setup if you want /subs, /pool, /mp-preset." });
+  checks.push({ name: "Request logs", ok: true, detail: `${getRecentRequestLogs(5).length} recent`, hint: "Use ep logs --last-request after a failed Codex turn." });
+
+  if (fix && active) {
+    try {
+      const fixedPort = await ensureProxyDaemon();
+      await applyProxy(fixedPort);
+      setUserEnv("EP_API_KEY", "end-pi-local");
+      console.log(`[ end-pi ] doctor --fix: proxy ensured on ${fixedPort}`);
+    } catch (error: any) {
+      console.log(`[ end-pi ] doctor --fix failed: ${error?.message ?? error}`);
+    }
+  }
+
+  console.log(`\n[ end-pi ] Doctor`);
+  for (const check of checks) {
+    console.log(`  ${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`);
+    if (!check.ok && check.hint) console.log(`      hint: ${check.hint}`);
+  }
+  console.log(`\n  Logs: ep logs --last-request | ep logs --requests | ep logs --lines=200`);
+  console.log(`  Smoke tests: ep smoke`);
+}
+
+function printSmokeChecklist(): void {
+  console.log(`\n[ end-pi ] Smoke checklist`);
+  console.log(`  1. ep --version`);
+  console.log(`  2. ep --status --no-update`);
+  console.log(`  3. ep doctor --no-update`);
+  console.log(`  4. ep --restore`);
+  console.log(`  5. ep`);
+  console.log(`  6. Ask Codex to find a real file or symbol in the current workspace.`);
+  console.log(`  7. Attach an image and ask a vision-capable Pi model to read it.`);
+  console.log(`  8. Switch Pi /model across providers and retry one tool task.`);
+  console.log(`  9. ep logs --last-request after any failure.`);
+  console.log(`\n  Full checklist: docs/REGRESSION.md`);
+  console.log(`  Troubleshooting: docs/TROUBLESHOOTING.md`);
+}
+
+function commandExists(command: string): boolean {
+  const lookup = process.platform === "win32" ? "where" : "which";
+  return spawnSync(lookup, [command], { stdio: "ignore", windowsHide: true }).status === 0;
+}
+
+async function endpointHealthy(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(1000) });
+    const body = await res.json().catch(() => null) as { service?: string } | null;
+    return res.ok && body?.service === "end-pi";
+  } catch {
+    return false;
   }
 }
 

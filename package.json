@@ -1,6 +1,6 @@
 {
   "name": "end-pi",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Use Pi providers in Codex Desktop with seamless history switching, image input, and a local OpenAI-compatible proxy.",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "dist",
     "assets",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -27,7 +28,11 @@
     "openai",
     "extension",
     "vision",
-    "oauth"
+    "oauth",
+    "diagnostics",
+    "doctor",
+    "tools",
+    "agent"
   ],
   "license": "MIT",
   "dependencies": {

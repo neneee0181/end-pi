@@ -105,6 +105,25 @@ ep --status
 
 `end-pi` uses port `3141` by default. If that port is busy, it automatically selects a nearby free port and patches Codex with the selected endpoint. To force a port, set `END_PI_PORT`.
 
+Run diagnostics:
+
+```bash
+ep doctor
+ep doctor --fix
+ep smoke
+```
+
+`ep doctor` checks Node, Pi, Codex config, provider auth, active model, daemon health, endpoint health, multi-pass, and recent request logs. `--fix` only repairs the active `end-pi` proxy/endpoint; it does not switch native Codex into `end-pi` mode by itself.
+
+Inspect logs:
+
+```bash
+ep logs
+ep logs --last-request
+ep logs --requests
+ep logs --lines=200
+```
+
 Install or verify the multi-pass companion extension:
 
 ```bash
@@ -149,6 +168,17 @@ Proxy logs are written to:
 ```text
 ~/.codex/end-pi.log
 ```
+
+Request snapshots are written to:
+
+```text
+~/.codex/end-pi-requests/
+```
+
+For smoke tests and troubleshooting, see:
+
+- [Regression checklist](./docs/REGRESSION.md)
+- [Troubleshooting](./docs/TROUBLESHOOTING.md)
 
 ## Notes
 

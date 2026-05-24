@@ -10,10 +10,10 @@ tags:
   - memoc/state
 ---
 # Session Summary
-Last: 2026-05-24T23:25:00+09:00
+Last: 2026-05-24T23:45:00+09:00
 
 ## Status
-- Version 0.0.17 in progress.
+- Version 0.0.18 in progress.
 - Proxy bridges Codex Responses tools to Pi; logs under `~/.codex/end-pi-requests`.
 
 ## Changed
@@ -21,6 +21,7 @@ Last: 2026-05-24T23:25:00+09:00
 - Removed user/tool-specific stuck-command guidance.
 - Added generic no-match search guidance so models broaden exact failed searches before concluding absent.
 - Preserved developer/system instructions as Pi system context and exposed Codex namespace tools via aliases.
+- Added doctor/log/smoke diagnostics and regression/troubleshooting docs.
 
 ## Open Tasks
 - Build, pack, commit, tag, push.
