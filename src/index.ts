@@ -67,7 +67,7 @@ async function main() {
   }
 
   if (args.includes("setup") || args.includes("--setup") || args.includes("--install-multipass")) {
-    await installMultipass();
+    await installOrUpdateMultipass();
     return;
   }
 
@@ -135,10 +135,13 @@ async function main() {
 
   const alreadyActive = isProxyActive();
   if (!alreadyActive) {
+    if (!args.includes("--no-update")) await maybeUpdateMultipass();
     startTransition("--switch-proxy");
     console.log(`[ end-pi ] switching to proxy in background. Codex will restart.`);
     return;
   }
+
+  if (!args.includes("--no-update")) await maybeUpdateMultipass();
 
   await ensureProxyDaemon();
   const port = readSavedProxyPort();
@@ -496,10 +499,10 @@ function launchPiTui(): void {
   process.on("SIGINT", () => pi.kill("SIGINT"));
 }
 
-async function installMultipass(): Promise<void> {
+async function installOrUpdateMultipass(): Promise<void> {
   console.log(`\n[ end-pi ] Multi-pass companion`);
   if (isMultipassInstalled()) {
-    console.log(`  ✓ ${MULTIPASS_PACKAGE} is already installed.`);
+    await maybeUpdateMultipass(true);
     console.log(`  Open Pi with 'ep' and use /subs, /pool, or /mp-preset.\n`);
     return;
   }
@@ -522,6 +525,81 @@ async function installMultipass(): Promise<void> {
 
   console.log(`\n  Install command finished, but the extension was not detected in ~/.pi/agent/extensions.`);
   console.log(`  Open Pi once, then run 'ep --status' to check again.\n`);
+}
+
+async function maybeUpdateMultipass(verbose = false): Promise<boolean> {
+  if (process.env.EP_SKIP_MULTIPASS_UPDATE === "1") return false;
+  if (MULTIPASS_GIT_SPEC) return false;
+
+  const current = getInstalledMultipassVersion();
+  if (!current) return false;
+
+  const npmDir = join(PI_AGENT_DIR, "npm");
+  const install = spawnSync(
+    shellCommand([npmCommand(), "install", "--prefix", npmDir, `${MULTIPASS_PACKAGE}@latest`]),
+    {
+      encoding: "utf-8",
+      shell: true,
+      windowsHide: true,
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        NO_UPDATE_NOTIFIER: "1",
+        NPM_CONFIG_UPDATE_NOTIFIER: "false",
+        NPM_CONFIG_FUND: "false",
+        NPM_CONFIG_AUDIT: "false",
+      },
+    },
+  );
+  if (install.status !== 0) {
+    if (verbose) {
+      const detail = install.stderr?.trim() || install.error?.message || `exit ${install.status}`;
+      console.warn(`  Could not update ${MULTIPASS_PACKAGE}; continuing with ${current}. ${detail}`);
+    }
+    return false;
+  }
+
+  const installed = getInstalledMultipassVersion();
+  if (installed && compareVersions(installed, current) > 0) {
+    console.log(`[ end-pi ] ${MULTIPASS_PACKAGE} updated ${current} → ${installed}.`);
+    return true;
+  }
+
+  if (verbose) console.log(`  ✓ ${MULTIPASS_PACKAGE} is up to date (${installed ?? current}).`);
+  return false;
+}
+
+function shellCommand(parts: string[]): string {
+  return parts.map((part, index) => index === 0 ? part : shellQuote(part)).join(" ");
+}
+
+function npmCommand(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
+function shellQuote(value: string): string {
+  if (process.platform === "win32") return `"${value.replace(/"/g, '\\"')}"`;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function getInstalledMultipassVersion(): string | null {
+  const candidates = [
+    join(PI_AGENT_DIR, "npm", "node_modules", MULTIPASS_PACKAGE, "package.json"),
+    ...findPackagePackageJsons(join(PI_AGENT_DIR, "git"), MULTIPASS_PACKAGE),
+  ];
+  for (const path of candidates) {
+    try {
+      const pkg = JSON.parse(readFileSync(path, "utf-8")) as { version?: string; name?: string };
+      if (pkg.name === MULTIPASS_PACKAGE && typeof pkg.version === "string") return pkg.version;
+    } catch {
+      // Try the next install location.
+    }
+  }
+  return null;
+}
+
+function findPackagePackageJsons(root: string, packageName: string): string[] {
+  return findPackageExtensionDirs(root, packageName).map((dir) => join(dirname(dir), "package.json"));
 }
 
 function isMultipassInstalled(): boolean {

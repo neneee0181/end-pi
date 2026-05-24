@@ -111,6 +111,12 @@ ep setup
 ep --status
 ```
 
+Normal `ep` also checks for newer npm releases of `end-pi-multi-pass` when the companion is already installed. To skip that check:
+
+```bash
+EP_SKIP_MULTIPASS_UPDATE=1 ep
+```
+
 If installing from a custom git source:
 
 ```bash

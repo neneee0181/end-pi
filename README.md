@@ -64,6 +64,7 @@ This installs `end-pi-multi-pass` through Pi when it is missing. After that, ope
 ```
 
 By default, the companion is installed from npm. If you need a custom git source, set `END_PI_MULTIPASS_GIT` before running setup.
+When `end-pi-multi-pass` is already installed from npm, `ep` checks for a newer npm version and updates it before opening Pi. Set `EP_SKIP_MULTIPASS_UPDATE=1` to skip this companion update check.
 
 Start or switch Codex Desktop into Pi-backed mode:
 

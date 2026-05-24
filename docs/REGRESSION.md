@@ -22,6 +22,7 @@ Expected:
 - JSON doctor output is valid JSON and contains no tokens/secrets.
 - `ep logs --last-request` prints a summary without secrets.
 - Transform tests pass after build.
+- Normal `ep` checks installed `end-pi-multi-pass` npm version unless `--no-update` or `EP_SKIP_MULTIPASS_UPDATE=1` is used.
 
 ## Switch flow
 
