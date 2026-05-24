@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+import { serve } from "@hono/node-server";
+import { spawn } from "child_process";
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { fileURLToPath } from "url";
+import { join } from "path";
+import { app } from "./server.js";
+import { readPiAuth, readPiSettings, isTokenExpired } from "./pi-config.js";
+import { applyProxy, restoreProxy, isProxyActive, migrateToProxy } from "./codex-patch.js";
+import { findCodexLaunchTarget, killCodexDesktop, launchCodexDesktop, setUserEnv } from "./platform.js";
+
+const PORT = 3141;
+const args = process.argv.slice(2);
+const CODEX_DIR = join(homedir(), ".codex");
+const PID_FILE = join(CODEX_DIR, "end-pi-proxy.pid");
+const LOG_FILE = join(CODEX_DIR, "end-pi.log");
+const ENTRY_FILE = fileURLToPath(import.meta.url);
+
+async function main() {
+  if (args.includes("--proxy-daemon")) {
+    await runProxyDaemon();
+    return;
+  }
+
+  if (args.includes("--switch-proxy")) {
+    await switchToProxy();
+    return;
+  }
+
+  if (args.includes("--switch-restore")) {
+    await switchToVanilla();
+    return;
+  }
+
+  if (args.includes("--restore") || args.includes("--resotre") || args.includes("-r")) {
+    console.log("\n[ end-pi ] Restoring Codex to vanilla...\n");
+    if (!isProxyActive()) {
+      console.log("  Already restored. Opening Pi TUI.\n");
+      launchPiTui();
+      return;
+    }
+    startTransition("--switch-restore");
+    console.log("  Switching in background. Codex will restart.");
+    return;
+  }
+
+  if (args.includes("--status") || args.includes("-s")) {
+    const active = isProxyActive();
+    const auth = await readPiAuth().catch(() => ({}));
+    const settings = await readPiSettings();
+    console.log(`\n[ end-pi ] Status`);
+    console.log(`  Proxy:    ${active ? "✓ active" : "✗ inactive"}`);
+    console.log(`  Model:    ${settings.defaultProvider ?? "?"}/${settings.defaultModel ?? "?"}`);
+    console.log(`  Providers:`);
+    for (const [provider, entry] of Object.entries(auth)) {
+      const expired = isTokenExpired(entry);
+      console.log(`    ${expired ? "✗" : "✓"} ${provider}${expired ? " (expired)" : ""}`);
+    }
+    console.log(`  Daemon:   ${(await isProxyDaemonRunning()) ? "✓ running" : "✗ stopped"}`);
+    console.log(`  Log:      ~/.codex/end-pi.log`);
+    return;
+  }
+
+  // Validate auth
+  let auth: Awaited<ReturnType<typeof readPiAuth>>;
+  try {
+    auth = await readPiAuth();
+  } catch {
+    console.error("[ end-pi ] Pi auth not found. Open Pi and log in first.");
+    process.exit(1);
+  }
+
+  const activeProviders = Object.entries(auth).filter(([, e]) => !isTokenExpired(e));
+  if (activeProviders.length === 0) {
+    console.error("[ end-pi ] All Pi tokens expired. Run 'pi' first and re-authenticate.");
+    process.exit(1);
+  }
+
+  const alreadyActive = isProxyActive();
+  if (!alreadyActive) {
+    startTransition("--switch-proxy");
+    console.log(`[ end-pi ] switching to proxy in background. Codex will restart.`);
+    return;
+  }
+
+  await ensureProxyDaemon();
+  migrateToProxy();
+  setUserEnv("EP_API_KEY", "end-pi-local");
+
+  // Print startup info BEFORE Pi takes over stdout
+  console.log(`[ end-pi ] proxy:${PORT} | already active | log: ~/.codex/end-pi.log`);
+
+  launchPiTui();
+}
+
+async function switchToProxy(): Promise<void> {
+  daemonLog("switch proxy: start");
+  await ensureProxyDaemon();
+  const launchTarget = findCodexLaunchTarget();
+  killCodexDesktop();
+  await new Promise((r) => setTimeout(r, 1200));
+  await applyProxy(PORT);
+  migrateToProxy();
+  setUserEnv("EP_API_KEY", "end-pi-local");
+  daemonLog(`switch proxy: launch=${launchCodexDesktop(launchTarget)}`);
+  daemonLog("switch proxy: complete");
+}
+
+async function switchToVanilla(): Promise<void> {
+  daemonLog("switch restore: start");
+  const launchTarget = findCodexLaunchTarget();
+  killCodexDesktop();
+  await new Promise((r) => setTimeout(r, 1200));
+  await restoreProxy();
+  daemonLog(`switch restore: launch=${launchCodexDesktop(launchTarget)}`);
+  daemonLog("switch restore: complete");
+}
+
+function startTransition(mode: "--switch-proxy" | "--switch-restore"): void {
+  const child = spawn(process.execPath, [ENTRY_FILE, mode], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+function launchPiTui(): void {
+  const pi = spawn("pi", [], { stdio: "inherit", shell: true });
+
+  pi.on("close", async (code) => {
+    process.exit(code ?? 0);
+  });
+
+  process.on("SIGINT", () => pi.kill("SIGINT"));
+}
+
+async function runProxyDaemon(): Promise<void> {
+  process.on("uncaughtException", (err) => {
+    daemonLog(`daemon crash: ${err.stack ?? err.message}`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (err) => {
+    daemonLog(`daemon rejection: ${String(err)}`);
+    process.exit(1);
+  });
+
+  writeFileSync(PID_FILE, String(process.pid), "utf-8");
+  daemonLog(`daemon starting pid=${process.pid}`);
+
+  const server = serve({ fetch: app.fetch, port: PORT });
+  daemonLog(`daemon listening http://localhost:${PORT}`);
+  const cleanup = () => {
+    server.close();
+    if (existsSync(PID_FILE) && readFileSync(PID_FILE, "utf-8").trim() === String(process.pid)) {
+      unlinkSync(PID_FILE);
+    }
+  };
+  process.on("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
+}
+
+async function ensureProxyDaemon(): Promise<void> {
+  if (await isProxyDaemonRunning()) return;
+
+  const child = spawn(process.execPath, [ENTRY_FILE, "--proxy-daemon"], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (await isProxyDaemonRunning()) return;
+  }
+
+  throw new Error("Proxy daemon did not start. Run 'ep --status' or check ~/.codex/end-pi.log.");
+}
+
+async function isProxyDaemonRunning(): Promise<boolean> {
+  for (const host of ["localhost", "[::1]", "127.0.0.1"]) {
+    try {
+      const res = await fetch(`http://${host}:${PORT}/health`, { signal: AbortSignal.timeout(1000) });
+      if (!res.ok) continue;
+      const body = await res.json().catch(() => null) as { service?: string } | null;
+      if (body?.service === "end-pi") return true;
+    } catch { /* try next host */ }
+  }
+  return false;
+}
+
+function daemonLog(message: string): void {
+  try {
+    appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${message}\n`, "utf-8");
+  } catch { /* logging must not break startup */ }
+}
+
+main().catch((err) => {
+  console.error("[ end-pi ] Error:", err.message);
+  process.exit(1);
+});

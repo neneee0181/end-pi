@@ -1,0 +1,48 @@
+{
+  "name": "end-pi",
+  "version": "0.0.1",
+  "description": "Use Pi providers in Codex Desktop with seamless history switching, image input, and a local OpenAI-compatible proxy.",
+  "type": "module",
+  "bin": {
+    "ep": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "prepack": "npm run build",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "pi",
+    "codex",
+    "codex-desktop",
+    "proxy",
+    "openai",
+    "extension",
+    "vision",
+    "oauth"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.75.5",
+    "@hono/node-server": "^1.13.7",
+    "better-sqlite3": "^12.10.0",
+    "hono": "^4.7.7",
+    "toml": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
