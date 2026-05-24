@@ -15,6 +15,7 @@ const args = process.argv.slice(2);
 const CODEX_DIR = join(homedir(), ".codex");
 const PID_FILE = join(CODEX_DIR, "end-pi-proxy.pid");
 const LOG_FILE = join(CODEX_DIR, "end-pi.log");
+const REQUEST_LOG_DIR = join(CODEX_DIR, "end-pi-requests");
 const ENTRY_FILE = fileURLToPath(import.meta.url);
 const PACKAGE_JSON_FILE = join(dirname(ENTRY_FILE), "..", "package.json");
 const MULTIPASS_PACKAGE = "end-pi-multi-pass";
@@ -45,6 +46,11 @@ async function main() {
 
   if (args.includes("setup") || args.includes("--setup") || args.includes("--install-multipass")) {
     await installMultipass();
+    return;
+  }
+
+  if (args.includes("logs") || args.includes("--logs")) {
+    printLogs();
     return;
   }
 
@@ -109,6 +115,34 @@ async function main() {
   console.log(`[ end-pi ] multipass:${isMultipassInstalled() ? "installed" : "not installed (run 'ep setup')"}`);
 
   launchPiTui();
+}
+
+function printLogs(): void {
+  const linesArg = args.find((arg) => /^--lines=\d+$/.test(arg));
+  const lines = linesArg ? Number(linesArg.split("=")[1]) : 120;
+  console.log(`\n[ end-pi ] Logs`);
+  console.log(`  Main:     ${LOG_FILE}`);
+  console.log(`  Requests: ${REQUEST_LOG_DIR}\n`);
+
+  try {
+    const log = readFileSync(LOG_FILE, "utf-8").split(/\r?\n/).filter(Boolean);
+    for (const line of log.slice(-lines)) console.log(line);
+  } catch {
+    console.log("  No main log found yet.");
+  }
+
+  try {
+    const requests = readdirSync(REQUEST_LOG_DIR)
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+      .slice(-5);
+    if (requests.length) {
+      console.log(`\n[ end-pi ] Recent request logs`);
+      for (const name of requests) console.log(`  ${join(REQUEST_LOG_DIR, name)}`);
+    }
+  } catch {
+    // No request logs yet.
+  }
 }
 
 async function maybeSelfUpdate(): Promise<boolean> {

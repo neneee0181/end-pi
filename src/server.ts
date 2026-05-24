@@ -10,15 +10,19 @@ import {
   isAntigravityProvider,
   streamAntigravityDirect,
 } from "./antigravity.js";
-import { createWriteStream } from "fs";
+import { createWriteStream, mkdirSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
 type PiUserContentPart = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type ProxyStreamFn = typeof piStream;
+type ResponseOutputItem = Record<string, unknown>;
+type RememberedToolCall = { id: string; name: string; arguments: Record<string, unknown>; thoughtSignature?: string };
 
 // Log to file, not stdout (Pi TUI owns stdout)
-const logFile = createWriteStream(join(homedir(), ".codex", "end-pi.log"), { flags: "a" });
+const CODEX_DIR = join(homedir(), ".codex");
+const REQUEST_LOG_DIR = join(CODEX_DIR, "end-pi-requests");
+const logFile = createWriteStream(join(CODEX_DIR, "end-pi.log"), { flags: "a" });
 logFile.on("error", () => {
   // Keep the proxy alive even if the log file is locked or unavailable.
 });
@@ -28,6 +32,7 @@ const writeLog = (prefix: string, args: unknown[]) => {
 };
 const log = (...args: unknown[]) => writeLog("", args);
 const logErr = (...args: unknown[]) => writeLog("ERR ", args);
+const rememberedToolCalls = new Map<string, RememberedToolCall>();
 
 export const app = new Hono();
 
@@ -54,15 +59,16 @@ app.get("/v1/models", async (c) => {
 app.post("/v1/responses", async (c) => {
   const body = await c.req.json();
   const isStreaming: boolean = body.stream ?? false;
+  logRequestBody(body, "unresolved");
 
   const { piModel, accessToken, info, error, streamFn } = await resolvePiCurrentModel();
   if (error) return c.json({ error: { message: error } }, 503);
 
   log(`[ep] /v1/responses → ${info}`);
 
-  const context = responsesInputToPiContext(body.input);
+  const context = responsesInputToPiContext(body.input, body.instructions);
+  context.tools = responseToolsToPiTools(body.tools);
   const respId = `resp_${Date.now()}`;
-  const itemId = `msg_${Date.now()}`;
 
   if (isStreaming) {
     c.header("Content-Type", "text/event-stream");
@@ -77,28 +83,71 @@ app.post("/v1/responses", async (c) => {
         type: "response.created",
         response: makeResponse(respId, info, "in_progress"),
       });
-      await send("response.output_item.added", {
-        type: "response.output_item.added",
-        output_index: 0,
-        item: { id: itemId, type: "message", role: "assistant", content: [], status: "in_progress" },
-      });
-      await send("response.content_part.added", {
-        type: "response.content_part.added",
-        item_id: itemId, output_index: 0, content_index: 0,
-        part: { type: "output_text", text: "" },
-      });
-
       let fullText = "";
+      let textItemId = "";
+      let textStarted = false;
+      let outputIndex = 0;
+      const outputItems: ResponseOutputItem[] = [];
+      const ensureTextItem = async () => {
+        if (textStarted) return;
+        textStarted = true;
+        textItemId = `msg_${Date.now()}`;
+        await send("response.output_item.added", {
+          type: "response.output_item.added",
+          output_index: outputIndex,
+          item: { id: textItemId, type: "message", role: "assistant", content: [], status: "in_progress" },
+        });
+        await send("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: textItemId, output_index: outputIndex, content_index: 0,
+          part: { type: "output_text", text: "" },
+        });
+      };
+
       try {
         const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
         for await (const event of eventStream) {
           if (event.type === "text_delta") {
+            await ensureTextItem();
             fullText += event.delta;
             await send("response.output_text.delta", {
               type: "response.output_text.delta",
-              item_id: itemId, output_index: 0, content_index: 0,
+              item_id: textItemId, output_index: outputIndex, content_index: 0,
               delta: event.delta,
             });
+          } else if (event.type === "toolcall_end") {
+            if (textStarted) {
+              await finishTextItem(send, textItemId, outputIndex, fullText);
+              outputItems.push(messageOutputItem(textItemId, fullText));
+              outputIndex += 1;
+              textStarted = false;
+              fullText = "";
+            }
+            const item = functionCallOutputItem(event.toolCall);
+            await send("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: { ...item, status: "in_progress" },
+            });
+            await send("response.function_call_arguments.delta", {
+              type: "response.function_call_arguments.delta",
+              item_id: item.id,
+              output_index: outputIndex,
+              delta: item.arguments,
+            });
+            await send("response.function_call_arguments.done", {
+              type: "response.function_call_arguments.done",
+              item_id: item.id,
+              output_index: outputIndex,
+              arguments: item.arguments,
+            });
+            await send("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item,
+            });
+            outputItems.push(item);
+            outputIndex += 1;
           } else if (event.type === "error") {
             logErr(`[ep] stream error:`, (event as any).error?.errorMessage ?? event);
           }
@@ -108,35 +157,26 @@ app.post("/v1/responses", async (c) => {
         fullText = `[end-pi error] ${e.message}`;
       }
 
-      await send("response.output_text.done", {
-        type: "response.output_text.done",
-        item_id: itemId, output_index: 0, content_index: 0, text: fullText,
-      });
-      await send("response.content_part.done", {
-        type: "response.content_part.done",
-        item_id: itemId, output_index: 0, content_index: 0,
-        part: { type: "output_text", text: fullText },
-      });
-      await send("response.output_item.done", {
-        type: "response.output_item.done",
-        output_index: 0,
-        item: { id: itemId, type: "message", role: "assistant", content: [{ type: "output_text", text: fullText }], status: "completed" },
-      });
+      if (textStarted || fullText) {
+        await ensureTextItem();
+        await finishTextItem(send, textItemId, outputIndex, fullText);
+        outputItems.push(messageOutputItem(textItemId, fullText));
+      }
       await send("response.completed", {
         type: "response.completed",
         response: {
           ...makeResponse(respId, info, "completed"),
-          output: [{ id: itemId, type: "message", role: "assistant", content: [{ type: "output_text", text: fullText }], status: "completed" }],
+          output: outputItems,
         },
       });
     });
   } else {
     const eventStream = streamFn(piModel!, context, { apiKey: accessToken });
     const result = await eventStream.result();
-    const text = result.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+    const output = assistantContentToResponseOutput(result.content);
     return c.json({
       ...makeResponse(respId, info, "completed"),
-      output: [{ id: itemId, type: "message", role: "assistant", content: [{ type: "output_text", text }], status: "completed" }],
+      output,
       usage: { input_tokens: result.usage.input, output_tokens: result.usage.output, total_tokens: result.usage.totalTokens },
     });
   }
@@ -251,21 +291,54 @@ function stripMultipassSuffix(provider: string): string {
   return provider.replace(/-\d+$/, "");
 }
 
-function responsesInputToPiContext(input: unknown): PiContext {
+function responsesInputToPiContext(input: unknown, instructions?: unknown): PiContext {
+  const systemPrompt = typeof instructions === "string" ? instructions : undefined;
   if (typeof input === "string") {
-    return { messages: [{ role: "user", content: input, timestamp: Date.now() } as UserMessage] };
+    return { systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() } as UserMessage] };
   }
-  if (!Array.isArray(input)) return { messages: [] };
+  if (!Array.isArray(input)) return { systemPrompt, messages: [] };
+  const seenToolCalls = new Set<string>();
   return {
+    systemPrompt,
     messages: input
-      .filter((item: any) => item.type === "message")
-      .map((item: any) => {
+      .flatMap((item: any): Message[] => {
+        if (item.type === "function_call_output") {
+          const callId = String(item.call_id ?? item.callId ?? item.id ?? "");
+          const remembered = callId ? rememberedToolCalls.get(callId) : undefined;
+          const messages: Message[] = [];
+          if (remembered && !seenToolCalls.has(callId)) {
+            messages.push(toolCallToAssistantMessage(remembered));
+            seenToolCalls.add(callId);
+          }
+          messages.push({
+            role: "toolResult",
+            toolCallId: callId,
+            toolName: String(item.name ?? item.tool_name ?? remembered?.name ?? "tool"),
+            content: [{ type: "text", text: String(item.output ?? "") }],
+            isError: Boolean(item.is_error ?? item.isError ?? false),
+            timestamp: Date.now(),
+          } as Message);
+          return messages;
+        }
+        if (item.type === "function_call") {
+          const callId = String(item.call_id ?? item.callId ?? item.id ?? "");
+          const remembered = callId ? rememberedToolCalls.get(callId) : undefined;
+          const toolCall = {
+            id: callId,
+            name: String(item.name ?? remembered?.name ?? ""),
+            arguments: parseToolArguments(item.arguments) || remembered?.arguments || {},
+            thoughtSignature: remembered?.thoughtSignature,
+          };
+          seenToolCalls.add(callId);
+          return [toolCallToAssistantMessage(toolCall)];
+        }
+        if (item.type !== "message") return [];
         const content = responsePartsToPiContent(item.content);
         if (item.role === "assistant") {
           const text = content.filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
-          return { role: "assistant", content: [{ type: "text", text }], timestamp: Date.now(), api: "openai-responses" as any, provider: "openai" as any, model: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" as any } as AssistantMessage;
+          return [{ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now(), api: "openai-responses" as any, provider: "openai" as any, model: "", usage: emptyUsage(), stopReason: "stop" as any } as AssistantMessage];
         }
-        return { role: "user", content: content.length === 1 && content[0].type === "text" ? content[0].text : content, timestamp: Date.now() } as UserMessage;
+        return [{ role: "user", content: content.length === 1 && content[0].type === "text" ? content[0].text : content, timestamp: Date.now() } as UserMessage];
       }) as Message[],
   };
 }
@@ -279,7 +352,7 @@ function openAiToPiContext(messages: { role: string; content: any }[]): PiContex
       const content = chatPartsToPiContent(m.content);
       if (m.role === "assistant") {
         const text = content.filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
-        return { role: "assistant", content: [{ type: "text", text }], timestamp: Date.now(), api: "openai-responses" as any, provider: "openai" as any, model: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" as any } as AssistantMessage;
+        return { role: "assistant", content: [{ type: "text", text }], timestamp: Date.now(), api: "openai-responses" as any, provider: "openai" as any, model: "", usage: emptyUsage(), stopReason: "stop" as any } as AssistantMessage;
       }
       return { role: "user", content: content.length === 1 && content[0].type === "text" ? content[0].text : content, timestamp: Date.now() } as UserMessage;
     }) as Message[],
@@ -316,4 +389,146 @@ function imageUrlToPiContent(imageUrl: unknown): PiUserContentPart[] {
   const match = imageUrl.match(/^data:([^;,]+);base64,(.+)$/);
   if (!match) return [];
   return [{ type: "image", mimeType: match[1], data: match[2] }];
+}
+
+function responseToolsToPiTools(tools: unknown): PiContext["tools"] {
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool: any) => {
+    const fn = tool.function ?? tool;
+    const name = fn.name ?? tool.name ?? (tool.type && tool.type !== "function" ? tool.type : undefined);
+    if (!name) return [];
+    return [{
+      name: String(name),
+      description: String(fn.description ?? tool.description ?? ""),
+      parameters: fn.parameters ?? tool.parameters ?? tool.input_schema ?? { type: "object", properties: {} },
+    }];
+  });
+}
+
+function assistantContentToResponseOutput(content: AssistantMessage["content"]): ResponseOutputItem[] {
+  const output: ResponseOutputItem[] = [];
+  const text = content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+  if (text) output.push(messageOutputItem(`msg_${Date.now()}`, text));
+  for (const block of content as any[]) {
+    if (block.type === "toolCall") output.push(functionCallOutputItem(block));
+  }
+  return output;
+}
+
+function messageOutputItem(id: string, text: string): ResponseOutputItem {
+  return { id, type: "message", role: "assistant", content: [{ type: "output_text", text }], status: "completed" };
+}
+
+function functionCallOutputItem(toolCall: any): ResponseOutputItem {
+  const args = JSON.stringify(toolCall.arguments ?? {});
+  const callId = toolCall.id || `call_${Date.now()}`;
+  rememberedToolCalls.set(callId, {
+    id: callId,
+    name: toolCall.name,
+    arguments: toolCall.arguments ?? {},
+    thoughtSignature: toolCall.thoughtSignature,
+  });
+  return {
+    id: `fc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    type: "function_call",
+    call_id: callId,
+    name: toolCall.name,
+    arguments: args,
+    status: "completed",
+  };
+}
+
+function toolCallToAssistantMessage(toolCall: RememberedToolCall): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: toolCall.id,
+      name: toolCall.name,
+      arguments: toolCall.arguments,
+      ...(toolCall.thoughtSignature ? { thoughtSignature: toolCall.thoughtSignature } : {}),
+    }],
+    timestamp: Date.now(),
+    api: "openai-responses" as any,
+    provider: "openai" as any,
+    model: "",
+    usage: emptyUsage(),
+    stopReason: "toolUse" as any,
+  };
+}
+
+async function finishTextItem(
+  send: (event: string, data: unknown) => Promise<unknown>,
+  itemId: string,
+  outputIndex: number,
+  text: string,
+): Promise<void> {
+  await send("response.output_text.done", {
+    type: "response.output_text.done",
+    item_id: itemId,
+    output_index: outputIndex,
+    content_index: 0,
+    text,
+  });
+  await send("response.content_part.done", {
+    type: "response.content_part.done",
+    item_id: itemId,
+    output_index: outputIndex,
+    content_index: 0,
+    part: { type: "output_text", text },
+  });
+  await send("response.output_item.done", {
+    type: "response.output_item.done",
+    output_index: outputIndex,
+    item: messageOutputItem(itemId, text),
+  });
+}
+
+function parseToolArguments(raw: unknown): Record<string, unknown> {
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string") return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function emptyUsage(): AssistantMessage["usage"] {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function logRequestBody(body: unknown, info: string): void {
+  try {
+    mkdirSync(REQUEST_LOG_DIR, { recursive: true });
+    const file = join(REQUEST_LOG_DIR, `${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+    writeFileSync(file, JSON.stringify({ info, body: sanitizeForLog(body) }, null, 2), "utf-8");
+  } catch (error: any) {
+    logErr(`[ep] request log failed:`, error?.message ?? error);
+  }
+}
+
+function sanitizeForLog(value: unknown, depth = 0): unknown {
+  if (depth > 8) return "[truncated-depth]";
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) return `[image-data:${value.length}]`;
+    if (value.length > 4000) return `${value.slice(0, 4000)}...[truncated:${value.length}]`;
+    return value;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/api[_-]?key|authorization|token|secret/i.test(key)) out[key] = "[redacted]";
+    else out[key] = sanitizeForLog(item, depth + 1);
+  }
+  return out;
 }

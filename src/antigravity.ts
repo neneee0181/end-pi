@@ -11,6 +11,7 @@ import type {
   Context,
   Model,
   SimpleStreamOptions,
+  ToolCall,
 } from "@earendil-works/pi-ai";
 import type { PiAuth, PiAuthEntry } from "./pi-config.js";
 
@@ -115,11 +116,17 @@ function piContentToAntigravityParts(content: unknown): unknown[] {
 function contextToAntigravityContents(context: Context): unknown[] {
   return context.messages.map((message) => {
     if (message.role === "assistant") {
-      const text = message.content
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("");
-      return { role: "model", parts: [{ text }] };
+      const parts: unknown[] = message.content.flatMap((part): unknown[] => {
+        if (part.type === "text") return [{ text: part.text, ...(part.textSignature ? { thoughtSignature: part.textSignature } : {}) }];
+        if (part.type === "toolCall") {
+          return [{
+            functionCall: { name: part.name, args: part.arguments },
+            ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+          }];
+        }
+        return [];
+      });
+      return { role: "model", parts: parts.length ? parts : [{ text: "" }] };
     }
     if (message.role === "toolResult") {
       const text = message.content
@@ -133,6 +140,17 @@ function contextToAntigravityContents(context: Context): unknown[] {
     }
     return { role: "user", parts: piContentToAntigravityParts(message.content) };
   });
+}
+
+function toolsToAntigravityDeclarations(context: Context): unknown[] {
+  if (!context.tools?.length) return [];
+  return [{
+    functionDeclarations: context.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })),
+  }];
 }
 
 async function refreshAntigravityAccess(refreshToken: string, signal?: AbortSignal): Promise<AntigravityTokenResponse> {
@@ -218,18 +236,25 @@ async function callAntigravityDirect(
 ): Promise<Response> {
   const parsed = JSON.parse(apiKey) as { token?: string; projectId?: string };
   if (!parsed.token) throw new Error("Missing Antigravity OAuth token. Run /subs login.");
+  const tools = toolsToAntigravityDeclarations(context);
+  const request: Record<string, unknown> = {
+    contents: contextToAntigravityContents(context),
+    generationConfig: { maxOutputTokens: model.maxTokens || 8192 },
+    sessionId: randomUUID() + Date.now().toString(),
+    ...(context.systemPrompt ? { systemInstruction: { parts: [{ text: context.systemPrompt }] } } : {}),
+  };
+  if (tools.length) {
+    request.tools = tools;
+    request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
+  }
+
   const body = {
     project: parsed.projectId || `end-pi-${randomUUID().slice(0, 8)}`,
     model: model.id,
     userAgent: "antigravity",
     requestType: "agent",
     requestId: `agent-${randomUUID()}`,
-    request: {
-      contents: contextToAntigravityContents(context),
-      generationConfig: { maxOutputTokens: model.maxTokens || 8192 },
-      sessionId: randomUUID() + Date.now().toString(),
-      ...(context.systemPrompt ? { systemInstruction: { parts: [{ text: context.systemPrompt }] } } : {}),
-    },
+    request,
   };
   return fetch(`${ANTIGRAVITY_GENERATE_BASE_URL}/v1internal:streamGenerateContent?alt=sse`, {
     method: "POST",
@@ -283,6 +308,8 @@ export function streamAntigravityDirect(
 
       let text = "";
       let textStarted = false;
+      let textIndex = 0;
+      let toolCallCounter = 0;
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -309,24 +336,48 @@ export function streamAntigravityDirect(
             if (typeof usage?.candidatesTokenCount === "number") output.usage.output = usage.candidatesTokenCount;
             output.usage.totalTokens = output.usage.input + output.usage.output;
             for (const part of event.candidates?.[0]?.content?.parts ?? []) {
-              if (typeof part.text !== "string" || part.thought) continue;
-              if (!textStarted) {
-                output.content.push({ type: "text", text });
-                stream.push({ type: "text_start", contentIndex: 0, partial: output });
-                textStarted = true;
+              if (typeof part.text === "string" && !part.thought) {
+                if (!textStarted) {
+                  output.content.push({ type: "text", text, ...(part.thoughtSignature ? { textSignature: part.thoughtSignature } : {}) });
+                  textIndex = output.content.length - 1;
+                  stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
+                  textStarted = true;
+                }
+                text += part.text;
+                const textBlock = output.content[textIndex] as { type: "text"; text: string; textSignature?: string };
+                textBlock.text = text;
+                if (part.thoughtSignature) textBlock.textSignature = part.thoughtSignature;
+                stream.push({ type: "text_delta", contentIndex: textIndex, delta: part.text, partial: output });
               }
-              text += part.text;
-              (output.content[0] as { type: "text"; text: string }).text = text;
-              stream.push({ type: "text_delta", contentIndex: 0, delta: part.text, partial: output });
+              if (part.functionCall) {
+                const toolCall: ToolCall = {
+                  type: "toolCall",
+                  id: part.functionCall.id || `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`,
+                  name: part.functionCall.name || "",
+                  arguments: part.functionCall.args ?? {},
+                  ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+                };
+                output.content.push(toolCall);
+                const contentIndex = output.content.length - 1;
+                stream.push({ type: "toolcall_start", contentIndex, partial: output });
+                stream.push({
+                  type: "toolcall_delta",
+                  contentIndex,
+                  delta: JSON.stringify(toolCall.arguments),
+                  partial: output,
+                });
+                stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+              }
             }
           }
         }
       } finally {
         reader.releaseLock();
       }
-      if (textStarted) stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      if (textStarted) stream.push({ type: "text_end", contentIndex: textIndex, content: text, partial: output });
       output.timestamp = Date.now();
-      stream.push({ type: "done", reason: "stop", message: output });
+      if (output.content.some((part) => part.type === "toolCall")) output.stopReason = "toolUse";
+      stream.push({ type: "done", reason: output.stopReason === "toolUse" ? "toolUse" : "stop", message: output });
       stream.end();
     } catch (error) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
