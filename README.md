@@ -6,7 +6,7 @@ Use Pi providers inside Codex Desktop.
 
 ## Screenshot
 
-![Codex Desktop using end-pi](assets/codex-desktop.png)
+![Codex Desktop using end-pi](https://raw.githubusercontent.com/neneee0181/end-pi/main/assets/codex-desktop.png)
 
 ## Why
 
