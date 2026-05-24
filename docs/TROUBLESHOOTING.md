@@ -26,6 +26,7 @@ ep doctor
 Common causes:
 
 - Selected Pi provider token expired.
+- API-key providers must be read as Pi `api_key` auth entries, not OAuth providers.
 - Selected model does not support tools or images.
 - Provider stream ended without output.
 - Another process occupied the old proxy port.

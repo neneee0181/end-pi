@@ -12,7 +12,7 @@ export interface PiOAuthEntry {
 }
 
 export interface PiApiKeyEntry {
-  type: "apiKey";
+  type: "apiKey" | "api_key";
   key: string;
 }
 
@@ -50,14 +50,14 @@ export function isTokenExpired(entry: PiAuthEntry): boolean {
 }
 
 export function getAccessToken(entry: PiAuthEntry): string {
-  if (entry.type === "apiKey") return entry.key;
+  if (isApiKeyEntry(entry)) return entry.key;
   return entry.access;
 }
 
 export async function getAccessTokenForProvider(provider: string, auth: PiAuth, oauthProvider = provider): Promise<string> {
   const entry = auth[provider];
   if (!entry) throw new Error(`Provider "${provider}" not authenticated in Pi. Log in via Pi first.`);
-  if (entry.type === "apiKey") return entry.key;
+  if (isApiKeyEntry(entry)) return entry.key;
 
   const result = await getOAuthApiKey(oauthProvider, { [oauthProvider]: entry as unknown as OAuthCredentials });
   if (!result) throw new Error(`Provider "${provider}" not authenticated in Pi. Log in via Pi first.`);
@@ -65,4 +65,8 @@ export async function getAccessTokenForProvider(provider: string, auth: PiAuth, 
   auth[provider] = { type: "oauth", ...result.newCredentials };
   await writeFile(join(PI_DIR, "auth.json"), JSON.stringify(auth, null, 2), "utf-8");
   return result.apiKey;
+}
+
+function isApiKeyEntry(entry: PiAuthEntry): entry is PiApiKeyEntry {
+  return entry.type === "apiKey" || entry.type === "api_key";
 }

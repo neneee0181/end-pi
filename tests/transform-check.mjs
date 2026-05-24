@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getAccessTokenForProvider } from "../dist/pi-config.js";
 import { __test } from "../dist/server.js";
 
 const ctx = __test.responsesInputToPiContext([
@@ -48,5 +49,10 @@ const miss = __test.responsesInputToPiContext([
   },
 ]);
 assert.match(miss.messages[0].content[0].text, /one exact search as exhaustive/i);
+
+const googleKey = await getAccessTokenForProvider("google", {
+  google: { type: "api_key", key: "test-google-key" },
+});
+assert.equal(googleKey, "test-google-key");
 
 console.log("transform checks passed");
